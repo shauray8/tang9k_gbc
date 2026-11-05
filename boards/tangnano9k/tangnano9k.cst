@@ -1,0 +1,70 @@
+IO_LOC "clk27" 52;
+IO_PORT "clk27" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC "btn1_n" 3;
+IO_PORT "btn1_n" IO_TYPE=LVCMOS18 PULL_MODE=UP;
+IO_LOC "btn2_n" 4;
+IO_PORT "btn2_n" IO_TYPE=LVCMOS18 PULL_MODE=UP;
+
+IO_LOC "flash_cs_n" 60;
+IO_PORT "flash_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "flash_clk" 59;
+IO_PORT "flash_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "flash_mosi" 61;
+IO_PORT "flash_mosi" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "flash_miso" 62;
+IO_PORT "flash_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC "led_n[0]" 10;
+IO_LOC "led_n[1]" 11;
+IO_LOC "led_n[2]" 13;
+IO_LOC "led_n[3]" 14;
+IO_LOC "led_n[4]" 15;
+IO_LOC "led_n[5]" 16;
+IO_PORT "led_n[0]" IO_TYPE=LVCMOS18;
+IO_PORT "led_n[1]" IO_TYPE=LVCMOS18;
+IO_PORT "led_n[2]" IO_TYPE=LVCMOS18;
+IO_PORT "led_n[3]" IO_TYPE=LVCMOS18;
+IO_PORT "led_n[4]" IO_TYPE=LVCMOS18;
+IO_PORT "led_n[5]" IO_TYPE=LVCMOS18;
+
+IO_LOC "tmds_clk_p" 69;
+IO_PORT "tmds_clk_p" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_clk_n" 68;
+IO_PORT "tmds_clk_n" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_p[0]" 71;
+IO_PORT "tmds_d_p[0]" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_n[0]" 70;
+IO_PORT "tmds_d_n[0]" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_p[1]" 73;
+IO_PORT "tmds_d_p[1]" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_n[1]" 72;
+IO_PORT "tmds_d_n[1]" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_p[2]" 75;
+IO_PORT "tmds_d_p[2]" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_n[2]" 74;
+IO_PORT "tmds_d_n[2]" IO_TYPE=LVDS25E PULL_MODE=NONE DRIVE=8;
+
+// External joypad: push-buttons from these header pins to GND (internal pull-ups)
+IO_LOC "joy_n[2]" 25;
+IO_LOC "joy_n[3]" 26;
+IO_LOC "joy_n[1]" 27;
+IO_LOC "joy_n[0]" 28;
+IO_LOC "joy_n[4]" 29;
+IO_LOC "joy_n[5]" 30;
+IO_LOC "joy_n[6]" 31;
+IO_LOC "joy_n[7]" 32;
+IO_PORT "joy_n[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[6]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "joy_n[7]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// BL702 USB-UART (schematic: FPGA_RX = pin 18, FPGA_TX = pin 17)
+IO_LOC "uart_rx" 18;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC "uart_tx" 17;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33;

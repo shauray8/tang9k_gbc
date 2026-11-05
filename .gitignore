@@ -1,0 +1,31 @@
+# Downloaded tools, local ROM collections, and generated FPGA/simulator outputs.
+/build
+/tools
+/roms
+*.gb
+*.gbc
+*.gba
+*.GB
+*.GBC
+*.GBA
+*.sav
+*.srm
+*.bin
+*.fs
+*.bit
+*.vvp
+*.vcd
+*.fst
+*.ppm
+*.o
+*.tgz
+*.tar.gz
+*.tar.xz
+*.zip
+
+# Machine-local state and credentials.
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
