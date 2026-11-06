@@ -22,6 +22,8 @@ make rom ROM="/path/to/your/game.gb"
 
 No ROMs or downloaded tools are bundled. For keyboard control, focus the pad window: arrows, Z/A, X/B, Enter/Start, Backspace/Select. Close that window before running `host/gbctl.py status`, `diagnose`, or `load`. `sim/psram/run.sh sweep` needs no ROM; `sim/run.sh /path/to/test.gb 600` runs a supplied ROM in the core simulation.
 
+On the development Mac, use `/usr/bin/python3` explicitly for `play`: it includes Tk. The default Homebrew Python 3.14.8 lacks `_tkinter`, so `python3 host/gbctl.py play` raises `ModuleNotFoundError` even though USB-only commands work. No FPGA firmware change is needed. The system-Python window was observed mapped and handled generated Return press/release events; macOS window capture was unavailable. Street Fighter II Rev 1 (512 KiB, MBC1) was uploaded to PSRAM and its live title screen captured; gameplay input for that title is not yet confirmed.
+
 ## Headless pixel readback
 
 With no HDMI monitor attached, capture the running FPGA's 160×144 game image over the same USB cable:
