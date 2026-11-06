@@ -129,7 +129,7 @@ module PsramController #(
     end endgenerate
 
     wire accept_config = state == INIT && init_done;
-    wire accept_request = state == IDLE && req;
+    wire accept_request = !busy && req;
     reg start_config, start_request, start_transfer;
     always @(posedge clk)
         if (!resetn) begin start_config <= 0; start_request <= 0; start_transfer <= 0; end

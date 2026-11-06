@@ -7,7 +7,7 @@
 - File-backed ROM banking supports MBC1/3/5. There is no physical cartridge interface. Audio, persistent saves, MBC3 RTC and broad mapper compatibility remain incomplete.
 - HDMI audio is out of scope. All audio/APU implementation is deferred; current work targets CPU, DMA, graphics, memory and game compatibility.
 
-**Checkpoint status:** `b183f65` remains the last hardware-verified, flashed full-color build. The `152e6d6` isolated 162 MHz memory probe subsequently passed 20 physical reset/write/read stress runs; the known-good color image was restored afterward. Main RTL and constraints now target 162 MHz memory fabric, but full-design timing closure and hardware validation are still pending. Persistent flash is unchanged.
+**Checkpoint status:** the current full design is hardware-verified in SRAM with 162 MHz memory fabric: live `cgb-acid2` and `dmg-acid2` captures each match all 23,040 reference pixels, with scanout fingerprints `592a` and `7fb2`. The CPU is still normal-speed; KEY1 and HDMA are not implemented. Persistent flash remains on the verified `b183f65` image.
 
 ## Reproducing the build
 
@@ -73,8 +73,8 @@ flowchart LR
 - The GB core uses a clock enable (`tick`) in the 27 MHz domain. It produces exactly 70224 dots per HDMI frame (1650×750 = 1237500 video clocks = 450000 system clocks). The GB runs at 60.00 Hz instead of 59.73 Hz (0.46% fast).
 - `tick` spacing is 6–7 system clocks. Every CPU input (bus data, IRQ lines, joypad) changes on a tick edge; `din` and pending interrupts are registered one clock early.
 - The simulation testbench uses the same tick spacing as the hardware.
-- The verified color image uses an 81 MHz memory fabric. The current integration candidate targets 162 MHz, constrained by `boards/tangnano9k/tangnano9k.sdc`; it is not yet a verified full-design replacement.
-- Both memory PLL configurations keep the 648 MHz VCO and 27 MHz system clock: the 81 MHz configuration uses CLKOUTD3, while the 162 MHz candidate uses CLKOUTD/6. A separate PLL produces 371.25 MHz for the hard TMDS serializers; CLKDIV/5 supplies 74.25 MHz video timing. All four clocks have explicit SDC constraints.
+- The current verified SRAM image uses a 162 MHz memory fabric, constrained by `boards/tangnano9k/tangnano9k.sdc`. The persistent `b183f65` fallback uses 81 MHz.
+- Both memory PLL configurations keep the 648 MHz VCO and 27 MHz system clock: the 81 MHz configuration uses CLKOUTD3, while the 162 MHz configuration uses CLKOUTD/6. A separate PLL produces 371.25 MHz for the hard TMDS serializers; CLKDIV/5 supplies 74.25 MHz video timing. All four clocks have explicit SDC constraints.
 
 ## Video without a frame buffer
 - Six RGB555 lines occupy one BSRAM block. GB frame start is locked to `TARGET = 446400` of 450000 system clocks, 9900 video clocks before the next HDMI frame.
@@ -137,11 +137,11 @@ These are single-route results, not a multi-seed optimum. There are 1,505 LUTs l
 
 Capture remains isolated in `rtl/line_capture.v` and taps the PPU passively. Removing it and its UART commands can reclaim one BSRAM plus logic if later GBC features need the space; no removal delta has been measured.
 
-## Double-speed memory experiment (full-design verification pending)
+## Double-speed memory integration
 
 The 81 MHz baseline cannot sustain double-speed requests: the first observed complete transaction took 703.722 ns, exceeding even the minimum 444.444 ns request interval (12 system clocks). The read-data setup budget is tighter still: 370.370 ns (10 clocks). Merely adding KEY1 would therefore be unsafe.
 
-The candidate keeps four-phase registered I/O, but targets 162 MHz fabric / 40.5 MHz memory CK. The PLL still uses a 648 MHz VCO; CLKOUTD/6 supplies the unchanged 27 MHz system clock. Main RTL and SDC select this candidate; do not program it until the complete design meets timing.
+The controller keeps four-phase registered I/O at 162 MHz fabric / 40.5 MHz memory CK. The PLL uses a 648 MHz VCO; CLKOUTD/6 supplies the unchanged 27 MHz system clock. Main RTL and SDC select this configuration. Full-design timing and live normal-speed graphics are verified; this is not yet double-speed CPU gameplay.
 
 Changes in the checkpoint:
 - Controller command preparation, CA shift/enable, transmit-cycle and receive-window predecode shorten control paths. A PREPARE cycle registers command launch before physical transfer.
@@ -173,11 +173,13 @@ Only the timing-clean default-route bitstream is a hardware-test candidate. Thes
 
 The full color design was also rebuilt with its unchanged **81 MHz** memory clock into `build/fpga-memory81/gb.fs`: 7,117 LUTs, 2,238 FFs and 26 BSRAM blocks. Post-route Fmax: system 32.68 MHz (required 27), memory 133.17 MHz (required 81), video 94.02 MHz (required 74.25). This is an offline build result, not a new hardware verification.
 
-**Physical isolated-memory gate passed:** the timing-clean `152e6d6` probe completed 20 SRAM-only reset/write/read runs, each writing and checking 512 bytes with a changing pattern. Crystal-referenced telemetry measured 162.0 MHz memory fabric and 27.0 MHz system clock. The known-good `b183f65` color image was restored via SRAM afterward. This does not validate the subsequent controller edits or full-core 162 MHz integration; KEY1 and HDMA remain unimplemented.
+**Physical isolated-memory gate passed:** the timing-clean `152e6d6` probe completed 20 SRAM-only reset/write/read runs, each writing and checking 512 bytes with a changing pattern. Crystal-referenced telemetry measured 162.0 MHz memory fabric and 27.0 MHz system clock. This was isolated-memory proof, preceding the full-design checks below.
 
-An integrated 162 MHz candidate met post-route timing at **168.07 MHz memory / 29.05 MHz system / 90.93 MHz video**, using **7,135 LUTs / 2,259 FFs / 26 BSRAMs**, but failed the live `cgb-acid2` check: the LCD remained off with `pc_hi=FE`. The known-good image was restored. Internal clock closure alone therefore does not establish working PSRAM I/O. The following placement experiment anchors DQ transmit and RWDS byte-mask registers beside their pads as well as the existing receive registers; this experiment is not yet hardware-validated.
+An earlier integrated candidate met post-route timing at 168.07 MHz memory / 29.05 MHz system / 90.93 MHz video, but an early live check found the LCD off with `pc_hi=FE`; the known-good image was restored. These early startup observations did not establish a permanent stall. A subsequent full-core pin-model smoke used an insufficient 200 ms deadline: extending it allowed initialization to finish and three exact color frames to pass at about 295 ms. Live acceptance checks now allow two seconds after ROM upload before capture. No claim is made that transmit placement alone caused the improvement.
 
-Paused checkpoint: transmit DQ/byte-mask registers are now pad-placed, and controller busy is registered on the same IDLE entry/exit edges instead of decoded from the FSM. All 15 fast-memory stress/deadline corners and all 15 normal-speed corners pass in RTL simulation. The latest full route uses 7,142 LUTs but reaches only **141.18 MHz** on the required 162.02 MHz memory domain, so this revision has not been programmed. The earlier timing-clean candidate failed hardware as described above. The board was restored to `b183f65` via SRAM; persistent flash remains unchanged. KEY1 and HDMA are still unimplemented.
+At checkpoint `25d40ac`, transmit DQ/byte-mask registers were pad-placed and controller busy was registered on the same IDLE entry/exit edges instead of decoded from the FSM, but the full route reached only 141.18 MHz. Request admission now uses that existing registered busy flag rather than decoding IDLE again. All 15 fast-memory stress/deadline corners and all 15 normal-speed corners pass in RTL simulation.
+
+The resulting full route uses **7,110 LUTs / 2,260 FFs / 26 BSRAMs**. Post-route Fmax is **171.53 MHz memory / 30.90 MHz system / 95.02 MHz video**, meeting the respective 162.02 / 27 / 74.25 MHz requirements. SRAM programming was CRC-verified; live `cgb-acid2` and `dmg-acid2` each have **0 / 23,040 pixel mismatches**, with post-scaler fingerprints `592a` and `7fb2`. The current SRAM image is verified; persistent flash is unchanged.
 
 Reproduce the checks:
 
@@ -187,7 +189,7 @@ MEM_FREQ=162000000 STRESS=1 bash sim/psram/run.sh sweep
 make psram-probe PROBE_BRIDGE=1 PROBE_MEM_MHZ=162 PROBE_STRESS=1
 ```
 
-Full-design timing closure and live graphics checks are the next integration gate. Keep persistent flash on the verified color image; never program a route that fails its clock constraints.
+The fast-memory integration gate is passed for normal-speed CPU operation. KEY1/double-speed is the next gate; retain the persistent fallback and never program a route that fails its clock constraints.
 
 
 ## GBC accuracy targets
