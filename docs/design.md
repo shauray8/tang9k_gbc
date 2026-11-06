@@ -5,8 +5,9 @@
 - Goal: accurate Game Boy Color emulation with DMG compatibility. Game Boy Advance is out of scope.
 - Game Boy Color: 32 KiB banked WRAM, 16 KiB banked VRAM, CGB CPU startup registers and RGB555 rendering are implemented. KEY1/double-speed, HDMA and complete CGB bus/timing behavior remain unimplemented.
 - File-backed ROM banking supports MBC1/3/5. There is no physical cartridge interface. Audio, persistent saves, MBC3 RTC and broad mapper compatibility remain incomplete.
+- HDMI audio is out of scope. All audio/APU implementation is deferred; current work targets CPU, DMA, graphics, memory and game compatibility.
 
-**Checkpoint status:** `b183f65` is the last hardware-verified, flashed full-color build. The later memory work is experimental: simulations and the default-clock full-design route pass, but the changed controller/bridge has not been revalidated on the physical board. The main design's memory fabric remains 81 MHz. Use `b183f65` for known-good hardware; no experimental memory image has been programmed.
+**Checkpoint status:** `b183f65` remains the last hardware-verified, flashed full-color build. The `152e6d6` isolated 162 MHz memory probe subsequently passed 20 physical reset/write/read stress runs; the known-good color image was restored afterward. Main RTL and constraints now target 162 MHz memory fabric, but full-design timing closure and hardware validation are still pending. Persistent flash is unchanged.
 
 ## Reproducing the build
 
@@ -72,8 +73,8 @@ flowchart LR
 - The GB core uses a clock enable (`tick`) in the 27 MHz domain. It produces exactly 70224 dots per HDMI frame (1650×750 = 1237500 video clocks = 450000 system clocks). The GB runs at 60.00 Hz instead of 59.73 Hz (0.46% fast).
 - `tick` spacing is 6–7 system clocks. Every CPU input (bus data, IRQ lines, joypad) changes on a tick edge; `din` and pending interrupts are registered one clock early.
 - The simulation testbench uses the same tick spacing as the hardware.
-- Memory uses a separate 81 MHz fabric domain, constrained by `boards/tangnano9k/tangnano9k.sdc`. The pin model checks that requests return before the next DMG M-cycle. GBC double-speed bandwidth has not been established.
-- The unchanged 81 MHz memory PLL supplies the 27 MHz system clock through CLKOUTD3. A separate PLL produces 371.25 MHz for the hard TMDS serializers; CLKDIV/5 supplies 74.25 MHz video timing. All four clocks have explicit SDC constraints.
+- The verified color image uses an 81 MHz memory fabric. The current integration candidate targets 162 MHz, constrained by `boards/tangnano9k/tangnano9k.sdc`; it is not yet a verified full-design replacement.
+- Both memory PLL configurations keep the 648 MHz VCO and 27 MHz system clock: the 81 MHz configuration uses CLKOUTD3, while the 162 MHz candidate uses CLKOUTD/6. A separate PLL produces 371.25 MHz for the hard TMDS serializers; CLKDIV/5 supplies 74.25 MHz video timing. All four clocks have explicit SDC constraints.
 
 ## Video without a frame buffer
 - Six RGB555 lines occupy one BSRAM block. GB frame start is locked to `TARGET = 446400` of 450000 system clocks, 9900 video clocks before the next HDMI frame.
@@ -136,22 +137,23 @@ These are single-route results, not a multi-seed optimum. There are 1,505 LUTs l
 
 Capture remains isolated in `rtl/line_capture.v` and taps the PPU passively. Removing it and its UART commands can reclaim one BSRAM plus logic if later GBC features need the space; no removal delta has been measured.
 
-## Double-speed memory experiment (hardware verification pending)
+## Double-speed memory experiment (full-design verification pending)
 
 The 81 MHz baseline cannot sustain double-speed requests: the first observed complete transaction took 703.722 ns, exceeding even the minimum 444.444 ns request interval (12 system clocks). The read-data setup budget is tighter still: 370.370 ns (10 clocks). Merely adding KEY1 would therefore be unsafe.
 
-The candidate keeps four-phase registered I/O, but targets 162 MHz fabric / 40.5 MHz memory CK. The PLL still uses a 648 MHz VCO; CLKOUTD/6 supplies the unchanged 27 MHz system clock. This frequency is not enabled in the main top level.
+The candidate keeps four-phase registered I/O, but targets 162 MHz fabric / 40.5 MHz memory CK. The PLL still uses a 648 MHz VCO; CLKOUTD/6 supplies the unchanged 27 MHz system clock. Main RTL and SDC select this candidate; do not program it until the complete design meets timing.
 
 Changes in the checkpoint:
 - Controller command preparation, CA shift/enable, transmit-cycle and receive-window predecode shorten control paths. A PREPARE cycle registers command launch before physical transfer.
-- Registered response-valid allows the bridge to return a captured word before physical bus recovery finishes. Pending request toggles are retained until the controller is available, rather than discarded during recovery.
+- Registered response-valid allows the bridge to return a captured word before physical bus recovery finishes. It clears during recovery, before another command can launch, rather than decoding command acceptance into its reset. Pending request toggles are retained until the controller is available.
 - Read data is sampled continuously into the bridge output and again into the existing CPU input register. The CPU still uses a fixed cycle schedule; no fabricated fallback or memory wait-state workaround was added.
 - Timeout decode is registered one count early, the cycle counter scales with fabric frequency, and recovery preserves at least the modeled 36 ns requirement. Diagnostic-counter carry/saturation use registered lookahead.
 - The probe-only stress client writes 512 bytes across 256 LFSR word addresses before reading them all back. Reset changes its data pattern so stale contents from a preceding run cannot pass.
 - Receive data capture no longer inherits the command-reset priority decode: command acceptance and receive sampling occupy disjoint controller phases.
 - A one-fabric-clock bridge capture stage removes response decoding from the read-result register enable. Payload remains stable until acknowledgement crosses back; both normal-speed and double-speed deadline checks still pass.
-- Read/write command pulses use the existing launch predicate directly, without redundant IDLE decoding. The one-outstanding-request protocol prevents a second launch during command/response states.
+- The controller accepts one registered request pulse and stable write-enable metadata, replacing separate read/write pulses and their redundant command decode. The one-outstanding-request protocol prevents a second launch during command/response states.
 - Simulation clock arithmetic uses an explicit 64-bit picosecond constant for portability between Icarus and Verilator.
+- Startup and timeout counters use short prescalers with pipelined upper-chunk carries. Startup terminal decoding is split across registered nibbles; registered run/start controls keep wide decoding off counter feedback paths without changing the startup or timeout edges.
 
 The fast consumer regression issues 128 mixed reads/writes at twelve system clocks per request. It checks data before the CPU input register samples at clock ten, the byte consumed at clock eleven, and availability for the next request at clock twelve. Complete acknowledgement latency can reach 407.418 ns; it is separate from the earlier data-setup deadline. The normal-speed complete-acknowledgement assertion remains in place.
 
@@ -159,7 +161,7 @@ The 15 pin-delay combinations passed the fast consumer/stress checks in simulati
 
 A temporary full-core smoke also booted `cgb-acid2` and `dmg-acid2` through the actual bridge/controller and pin-level memory model at both 81 and 162 MHz fabric clocks. Each case matched all 23,040 reference pixels. The model was preloaded with ROM data; USB loading and physical I/O were not exercised. The CPU remained at normal speed: this is not a KEY1/double-speed gameplay result.
 
-The isolated stress probe now uses **647 LUTs / 508 FFs**. The selected default route meets the 162 MHz requirement, but placement sensitivity remains:
+The isolated `152e6d6` stress probe used **647 LUTs / 508 FFs**. Its selected default route met the 162 MHz requirement, but placement sensitivity remained:
 
 | Placement seed | Post-route memory Fmax | 162 MHz constraint |
 |---|---:|---|
@@ -171,7 +173,11 @@ Only the timing-clean default-route bitstream is a hardware-test candidate. Thes
 
 The full color design was also rebuilt with its unchanged **81 MHz** memory clock into `build/fpga-memory81/gb.fs`: 7,117 LUTs, 2,238 FFs and 26 BSRAM blocks. Post-route Fmax: system 32.68 MHz (required 27), memory 133.17 MHz (required 81), video 94.02 MHz (required 74.25). This is an offline build result, not a new hardware verification.
 
-**Hardware gate remains blocked:** the USB client reports the board missing, and independent macOS IOUSB enumeration shows no FTDI board. Physical fast-memory stress, full-core 162 MHz integration, KEY1 and HDMA remain unverified/unimplemented. The known-good flash image is unchanged.
+**Physical isolated-memory gate passed:** the timing-clean `152e6d6` probe completed 20 SRAM-only reset/write/read runs, each writing and checking 512 bytes with a changing pattern. Crystal-referenced telemetry measured 162.0 MHz memory fabric and 27.0 MHz system clock. The known-good `b183f65` color image was restored via SRAM afterward. This does not validate the subsequent controller edits or full-core 162 MHz integration; KEY1 and HDMA remain unimplemented.
+
+An integrated 162 MHz candidate met post-route timing at **168.07 MHz memory / 29.05 MHz system / 90.93 MHz video**, using **7,135 LUTs / 2,259 FFs / 26 BSRAMs**, but failed the live `cgb-acid2` check: the LCD remained off with `pc_hi=FE`. The known-good image was restored. Internal clock closure alone therefore does not establish working PSRAM I/O. The following placement experiment anchors DQ transmit and RWDS byte-mask registers beside their pads as well as the existing receive registers; this experiment is not yet hardware-validated.
+
+Paused checkpoint: transmit DQ/byte-mask registers are now pad-placed, and controller busy is registered on the same IDLE entry/exit edges instead of decoded from the FSM. All 15 fast-memory stress/deadline corners and all 15 normal-speed corners pass in RTL simulation. The latest full route uses 7,142 LUTs but reaches only **141.18 MHz** on the required 162.02 MHz memory domain, so this revision has not been programmed. The earlier timing-clean candidate failed hardware as described above. The board was restored to `b183f65` via SRAM; persistent flash remains unchanged. KEY1 and HDMA are still unimplemented.
 
 Reproduce the checks:
 
@@ -181,12 +187,12 @@ MEM_FREQ=162000000 STRESS=1 bash sim/psram/run.sh sweep
 make psram-probe PROBE_BRIDGE=1 PROBE_MEM_MHZ=162 PROBE_STRESS=1
 ```
 
-The isolated default-route probe now packs successfully. Reconnect the board, run physical stress with SRAM-only programming, and restore the verified color image before integrating a clock change. Alternative seeds above must not be programmed with failed timing.
+Full-design timing closure and live graphics checks are the next integration gate. Keep persistent flash on the verified color image; never program a route that fails its clock constraints.
 
 
 ## GBC accuracy targets
 
-- Next priorities: KEY1/double-speed and HDMA with a proven external-memory deadline; then audio, persistent saves, RTC and mapper coverage. Preserve DMG behavior at each step. The current PSRAM timing result is for normal speed, not double speed.
+- Next priorities: KEY1/double-speed and HDMA with a proven external-memory deadline; then persistent saves, RTC and mapper coverage. Preserve DMG behavior at each step. All audio/APU work is deferred; HDMI audio is out of scope. Fast-memory consumer simulations are not a double-speed gameplay result.
 - Maximum-ROM gameplay target: the user-provided `../Densha de Go! 2 (J) [C][!].gbc`, 8,388,608 bytes, CGB flag C0, mapper 1B (MBC5+RAM+battery), 32 KiB cartridge RAM. SHA-256: `aaf85dc22020cc7103bfcacb0bdd54568d4b391a0483fd3e11f18cd35c9c05a6`, matching the [documented cartridge dump](https://gbhwdb.gekkio.fi/cartridges/CGB-B82J-0/gekkio-1.html). The ROM stays outside Git.
 - Densha is not yet loadable: the current 22-bit cartridge path reserves the top 128 KiB of its 4 MiB window for save RAM, leaving 3.875 MiB for ROM. An 8 MiB ROM plus its 32 KiB save RAM requires a new backing-storage plan, not simply increasing the loader limit.
 - ROM size is a capacity test, not proof of worst-case CPU/PPU timing. [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) matches the official RGB reference exactly in RTL simulation and live FPGA capture (0 / 23,040 pixel mismatches). Applicable CGB [Mooneye](https://github.com/Gekkio/mooneye-test-suite) and [Mealybug Tearoom](https://github.com/mattcurrie/mealybug-tearoom-tests) cases remain planned, not claimed passing. Commercial GBC gameplay is also required.

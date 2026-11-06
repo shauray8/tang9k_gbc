@@ -30,8 +30,8 @@ module top (
 
     // ---------------- clocks and resets ----------------
     // Clock net names are referenced by boards/tangnano9k/tangnano9k.sdc.
-    wire mclk, clk_sys, mlock;      // 81 MHz memory fabric; 27 MHz system = mclk / 3 (same PLL)
-    pll_psram pll_mem (.clock_in(clk27), .clock_out(mclk), .clock_sys(clk_sys), .locked(mlock));
+    wire mclk, clk_sys, mlock;      // 162 MHz memory fabric; 27 MHz system = mclk / 6
+    pll_psram #(.FREQ(162_000_000)) pll_mem (.clock_in(clk27), .clock_out(mclk), .clock_sys(clk_sys), .locked(mlock));
     wire clk_ser, vlock, clk_pix;   // 371.25 MHz serializer; 74.25 MHz video = clk_ser / 5
     pll_video pll_vid (.clock_in(clk27), .clock_out(clk_ser), .locked(vlock));
     CLKDIV #(.DIV_MODE("5")) cdiv (.HCLKIN(clk_ser), .RESETN(vlock), .CALIB(1'b0), .CLKOUT(clk_pix));
@@ -43,13 +43,13 @@ module top (
     always @(posedge clk_pix) if (!vlock) vpor <= 0; else if (!vpor[7]) vpor <= vpor + 1;
     wire vrst = !vpor[7];
 
-    // ---------------- PSRAM (81 MHz domain) ----------------
+    // ---------------- PSRAM (162 MHz domain) ----------------
     reg [7:0] mpor = 0;
     always @(posedge mclk) if (!mlock) mpor <= 0; else if (!mpor[7]) mpor <= mpor + 1;
     assign O_psram_reset_n = {2{mpor[7]}};
     wire b_req, b_we, b_busy, p_ready, b_hang; wire [7:0] b_lat; wire [21:0] b_addr; wire [7:0] b_wd, b_rd;
     wire [7:0] b_state;
-    psram_bridge pb (
+    psram_bridge #(.FREQ(162_000_000)) pb (
         .clk(clk_sys), .rst(rst), .req(b_req), .we(b_we), .addr(b_addr), .wd(b_wd), .rd(b_rd),
         .busy(b_busy), .ready(p_ready), .hang(b_hang), .dbg_lat(b_lat), .dbg_word(),
         .dbg_state(b_state),

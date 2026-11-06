@@ -66,7 +66,7 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     reg [1:0] rq_s;
     reg rq_seen;
     reg [1:0] st;
-    reg c_rd, c_wr;
+    reg c_req;
     reg [7:0] m_q;
     assign m_data = m_q;
     wire c_busy, c_valid;
@@ -89,8 +89,10 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     always @(posedge mclk) begin
         if (!mrst_n) begin
             dbg_lat <= 0; counting <= 0; lat_full <= 0; lat_carry <= 0;
-        end else if (launch) begin
-            dbg_lat <= 0; counting <= 1; lat_full <= 0; lat_carry <= 0;
+        end else if (c_req) begin
+            // Command is registered one edge after launch; start at one so the
+            // completed diagnostic remains launch-relative without launch fanout.
+            dbg_lat <= 1; counting <= 1; lat_full <= 0; lat_carry <= 0;
         end else begin
             if (counting && !lat_full) begin
                 dbg_lat[3:0] <= dbg_lat[3:0] + 1'b1;
@@ -101,12 +103,8 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
             if (st == 2 && c_valid) counting <= 0;
         end
     end
-    // One outstanding request keeps launch disjoint from the command/response
-    // states. Generate the pulse directly rather than decoding IDLE a second time.
-    always @(posedge mclk) begin
-        c_rd <= mrst_n && launch && !we_h;
-        c_wr <= mrst_n && launch && we_h;
-    end
+    // One command pulse; write-enable is held with the request payload.
+    always @(posedge mclk) c_req <= mrst_n && launch;
     always @(posedge mclk) begin
         rq_s <= {rq_s[0], rq_t};
         if (!mrst_n) begin st <= 0; ak_t <= 0; m_ready <= 0; rq_s <= 0; rq_seen <= 0; end
@@ -127,7 +125,7 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
 
     PsramController #(.FREQ(FREQ), .LATENCY(3)) ctl (
         .clk(mclk), .resetn(mrst_n),
-        .read(c_rd), .write(c_wr), .addr(a_h), .din({d_h, d_h}), .byte_write(1'b1),
+        .req(c_req), .we(we_h), .addr(a_h), .din({d_h, d_h}), .byte_write(1'b1),
         .dout(c_dout), .busy(c_busy), .response_valid(c_valid),
         .debug(dbg_state),
         .O_psram_ck(O_psram_ck), .IO_psram_rwds(IO_psram_rwds), .IO_psram_dq(IO_psram_dq),

@@ -8,12 +8,12 @@ module PsramController #(
 ) (
     input clk,
     input resetn,
-    input read, write,
+    input req, we, // one command pulse plus write-enable metadata
     input [21:0] addr,
     input [15:0] din,
     input byte_write,
     output reg [15:0] dout,
-    output busy,
+    output reg busy,
     output reg response_valid, // response captured; physical bus recovery may still be active
     output [7:0] debug,
     output [1:0] O_psram_ck,
@@ -23,8 +23,10 @@ module PsramController #(
     output [1:0] O_psram_cs_n
 );
     localparam INIT_TIME = FREQ / 1000 * 160 / 1000;
+    localparam INIT_BITS = $clog2(INIT_TIME+1);
     localparam TIMEOUT_CYCLES = FREQ / 1_000_000 * 3;
     localparam CYCLE_BITS = $clog2(TIMEOUT_CYCLES / 4 + 2);
+    localparam ELAPSED_BITS = $clog2(TIMEOUT_CYCLES+1);
     localparam RECOVERY_CYCLES = ((FREQ / 1_000_000 * 36 + 999) / 1000) > 4 ?
                                 (FREQ / 1_000_000 * 36 + 999) / 1000 : 4;
     localparam [3:0] CR_LATENCY = LATENCY == 3 ? 4'he :
@@ -33,12 +35,16 @@ module PsramController #(
     localparam [2:0] INIT = 0, ACTIVE = 1, FINISH = 2,
                      RECOVER = 3, IDLE = 4, FAULT = 5, PREPARE = 6;
     (* fsm_encoding = "one-hot" *) reg [2:0] state;
-    reg [$clog2(INIT_TIME+1)-1:0] init_count;
-    reg init_done;
+    reg [INIT_BITS-1:0] init_count;
+    reg [(INIT_BITS-1)/2:3] init_carry;
+    reg init_done, init_last, init_run;
+    reg [(INIT_BITS+3)/4-1:0] init_terminal;
     reg [1:0] phase;
     reg [CYCLE_BITS-1:0] cycle;
     reg [$clog2(RECOVERY_CYCLES)-1:0] recovery;
-    reg [$clog2(TIMEOUT_CYCLES+1)-1:0] elapsed;
+    reg [ELAPSED_BITS-1:0] elapsed;
+    reg [(ELAPSED_BITS-1)/2:2] elapsed_carry;
+    reg elapsed_roll;
     reg [47:0] ca;
     reg [15:0] data;
     reg configuring, writing, masked, upper;
@@ -46,7 +52,6 @@ module PsramController #(
     reg [7:0] dq_out, first_byte;
     reg first_valid, read_complete;
 
-    assign busy = state != IDLE;
     assign debug = {state == FAULT, state == ACTIVE, writing, configuring,
                     first_valid, read_complete, dq_drive, rwds_drive};
     assign O_psram_ck = {1'b0, ck};
@@ -71,39 +76,86 @@ module PsramController #(
     (* BEL = "X1Y16/DFF0" *) always @(posedge clk) dq_in[7] <= IO_psram_dq[7];
     (* BEL = "X1Y16/DFF1" *) always @(posedge clk) rwds_in <= IO_psram_rwds[0];
 
-    // Keep the wide power-up counter comparison off transaction-control paths.
+    // Two-stage nibble decode predicts the terminal edge without changing
+    // the 160 us delay or putting a wide comparator on a feedback path.
+    genvar t;
+    generate for (t = 0; t < INIT_BITS; t = t + 4) begin: init_terminal_group
+        localparam WIDTH = INIT_BITS-t > 3 ? 4 : INIT_BITS-t;
+        localparam [WIDTH-1:0] LAST = (INIT_TIME-3) >> t;
+        always @(posedge clk)
+            if (!resetn) init_terminal[t/4] <= 0;
+            else init_terminal[t/4] <= init_count[t +: WIDTH] == LAST;
+    end endgenerate
     always @(posedge clk) begin
-        if (!resetn) begin init_count <= 0; init_done <= 0; end
-        else if (!init_done) begin
-            if (init_count == INIT_TIME-1) init_done <= 1;
-            else init_count <= init_count + 1'b1;
+        if (!resetn) begin init_last <= 0; init_done <= 0; init_run <= 1; end
+        else begin
+            init_last <= &init_terminal;
+            init_done <= init_done || init_last;
+            if (&init_terminal) init_run <= 0;
         end
     end
+    reg init_roll;
+    always @(posedge clk)
+        if (!resetn) init_roll <= 0;
+        else init_roll <= init_count[5:0] == 6'd62;
+    // The upper chunks change only every 64 clocks. Pipeline their carry
+    // prefix between those edges instead of synthesizing a 15-bit carry chain.
+    genvar p;
+    generate for (p = 0; p < INIT_BITS; p = p + 2) begin: init_group
+        localparam WIDTH = INIT_BITS-p > 1 ? 2 : 1;
+        if (p == 0) begin: low
+            always @(posedge clk)
+                if (!resetn) init_count[p +: WIDTH] <= 0;
+                else if (init_run) init_count[p +: WIDTH] <= init_count[p +: WIDTH] + 1'b1;
+        end else if (p < 6) begin: fast
+            reg carry;
+            always @(posedge clk) begin
+                if (!resetn) begin init_count[p +: WIDTH] <= 0; carry <= 0; end
+                else if (init_run) begin
+                    carry <= init_count[p-1:0] == {{(p-1){1'b1}}, 1'b0};
+                    if (carry) init_count[p +: WIDTH] <= init_count[p +: WIDTH] + 1'b1;
+                end
+            end
+        end else begin: slow
+            if (p == 6) always @(posedge clk) init_carry[p/2] <= 1'b1;
+            else always @(posedge clk)
+                if (!resetn) init_carry[p/2] <= 0;
+                else init_carry[p/2] <= init_carry[p/2-1] && init_count[p-1 -: 2] == 2'b11;
+            always @(posedge clk)
+                if (!resetn) init_count[p +: WIDTH] <= 0;
+                else if (init_run && init_roll && init_carry[p/2])
+                    init_count[p +: WIDTH] <= init_count[p +: WIDTH] + 1'b1;
+        end
+    end endgenerate
 
     wire accept_config = state == INIT && init_done;
-    wire accept_request = state == IDLE && (read || write);
-    reg start_config, start_request;
+    wire accept_request = state == IDLE && req;
+    reg start_config, start_request, start_transfer;
     always @(posedge clk)
-        if (!resetn) begin start_config <= 0; start_request <= 0; end
-        else begin start_config <= accept_config; start_request <= accept_request; end
+        if (!resetn) begin start_config <= 0; start_request <= 0; start_transfer <= 0; end
+        else begin
+            start_config <= accept_config; start_request <= accept_request;
+            start_transfer <= accept_config || accept_request;
+        end
     reg expired;
     // Register the terminal decode one count early, preserving the same timeout edge.
     always @(posedge clk)
-        if (!resetn || start_config || start_request) expired <= 0;
+        if (!resetn || start_transfer) expired <= 0;
         else expired <= state == ACTIVE && elapsed == TIMEOUT_CYCLES-2;
     wire abort_transfer = state == ACTIVE && expired;
-    // Hold a registered response until the next command. Clear on acceptance so
-    // the bridge's launch stage cannot mistake the previous word for a new one.
+    // Responses are visible during completion, then clear through recovery
+    // before another command can launch. No acceptance-to-valid reset path.
     always @(posedge clk)
-        if (!resetn || accept_request || abort_transfer) response_valid <= 0;
-        else if (!configuring && state != FAULT && (read_complete || state == FINISH)) response_valid <= 1;
+        if (!resetn || abort_transfer) response_valid <= 0;
+        else response_valid <= !configuring &&
+                               ((state == ACTIVE && read_complete) || state == FINISH);
     (* BEL = "X1Y7/DFF4" *) always @(posedge clk) begin
         if (!resetn || state == FINISH || abort_transfer) ck <= 0;
         else if (state == ACTIVE && phase[0]) ck <= !phase[1];
     end
     (* BEL = "X1Y5/DFF4" *) always @(posedge clk) begin
         if (!resetn || state == FINISH || abort_transfer) cs_n <= 1;
-        else if (start_config || start_request) cs_n <= 0;
+        else if (start_transfer) cs_n <= 0;
     end
     reg ca_shift, ca_enable, ca_cycle, write_cycle, read_window;
     reg end_cycle;
@@ -126,12 +178,44 @@ module PsramController #(
                   ({48{start_request}} & request_ca) |
                   ({48{ca_shift}} & {ca[31:0], 16'b0});
     end
+    // Four-bit prescaler; upper chunks have sixteen clocks to propagate their
+    // registered carry prefix. Counter values and the timeout edge are unchanged.
+    always @(posedge clk)
+        if (!resetn || start_transfer) elapsed_roll <= 0;
+        else if (state == ACTIVE) elapsed_roll <= elapsed[3:0] == 4'he;
+    genvar e;
+    generate for (e = 0; e < ELAPSED_BITS; e = e + 2) begin: elapsed_group
+        localparam WIDTH = ELAPSED_BITS-e > 1 ? 2 : 1;
+        if (e == 0) begin: low
+            always @(posedge clk)
+                if (!resetn || start_transfer) elapsed[e +: WIDTH] <= 0;
+                else if (state == ACTIVE) elapsed[e +: WIDTH] <= elapsed[e +: WIDTH] + 1'b1;
+        end else if (e < 4) begin: fast
+            reg carry;
+            always @(posedge clk) begin
+                if (!resetn || start_transfer) begin
+                    elapsed[e +: WIDTH] <= 0; carry <= 0;
+                end else if (state == ACTIVE) begin
+                    carry <= elapsed[e-1:0] == {{(e-1){1'b1}}, 1'b0};
+                    if (carry) elapsed[e +: WIDTH] <= elapsed[e +: WIDTH] + 1'b1;
+                end
+            end
+        end else begin: slow
+            if (e == 4) always @(posedge clk) elapsed_carry[e/2] <= 1'b1;
+            else always @(posedge clk)
+                if (!resetn || start_transfer) elapsed_carry[e/2] <= 0;
+                else elapsed_carry[e/2] <= elapsed_carry[e/2-1] && elapsed[e-1 -: 2] == 2'b11;
+            always @(posedge clk)
+                if (!resetn || start_transfer) elapsed[e +: WIDTH] <= 0;
+                else if (state == ACTIVE && elapsed_roll && elapsed_carry[e/2])
+                    elapsed[e +: WIDTH] <= elapsed[e +: WIDTH] + 1'b1;
+        end
+    end endgenerate
     always @(posedge clk) begin
-        if (!resetn || start_config || start_request) begin
-            phase <= 0; cycle <= 0; elapsed <= 0;
+        if (!resetn || start_transfer) begin
+            phase <= 0; cycle <= 0;
         end else if (state == ACTIVE) begin
             phase <= phase + 1'b1;
-            elapsed <= elapsed + 1'b1;
             if (phase == 3) cycle <= cycle + 1'b1;
         end
     end
@@ -139,7 +223,7 @@ module PsramController #(
     always @(posedge clk) begin
         before_last_ca <= cycle < 2;
         before_write <= writing && cycle == (configuring ? 2 : 1+2*LATENCY);
-        if (!resetn || start_config || start_request) begin
+        if (!resetn || start_transfer) begin
             ca_cycle <= 1; write_cycle <= 0; read_window <= 0;
         end
         else if (end_cycle) begin
@@ -170,11 +254,37 @@ module PsramController #(
         end
     end
 
+    // Transmit registers must also stay beside the die-0 pads: at 162 MHz
+    // there is only one fabric clock of data setup before forwarded CK.
+    wire tx_update = state == ACTIVE && !phase[0] && (ca_cycle || write_cycle);
+    wire [7:0] tx_byte = ca_cycle ?
+                        (phase[1] ? ca[39:32] : ca[47:40]) :
+                        (phase[1] ? data[7:0] : data[15:8]);
+    (* BEL = "X1Y1/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[0] <= 0; else if (tx_update) dq_out[0] <= tx_byte[0];
+    (* BEL = "X1Y2/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[1] <= 0; else if (tx_update) dq_out[1] <= tx_byte[1];
+    (* BEL = "X1Y2/DFF3" *) always @(posedge clk)
+        if (!resetn) dq_out[2] <= 0; else if (tx_update) dq_out[2] <= tx_byte[2];
+    (* BEL = "X1Y3/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[3] <= 0; else if (tx_update) dq_out[3] <= tx_byte[3];
+    (* BEL = "X1Y8/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[4] <= 0; else if (tx_update) dq_out[4] <= tx_byte[4];
+    (* BEL = "X1Y13/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[5] <= 0; else if (tx_update) dq_out[5] <= tx_byte[5];
+    (* BEL = "X1Y15/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[6] <= 0; else if (tx_update) dq_out[6] <= tx_byte[6];
+    (* BEL = "X1Y16/DFF2" *) always @(posedge clk)
+        if (!resetn) dq_out[7] <= 0; else if (tx_update) dq_out[7] <= tx_byte[7];
+    (* BEL = "X1Y16/DFF4" *) always @(posedge clk)
+        if (!resetn) rwds_out <= 0;
+        else if (state == ACTIVE && !phase[0] && !ca_cycle && write_cycle)
+            rwds_out <= masked && (phase[1] ? upper : !upper);
+
     always @(posedge clk) begin
         if (!resetn) begin
-            state <= INIT;
+            state <= INIT; busy <= 1;
             dq_drive <= 0; rwds_drive <= 0;
-            dq_out <= 0; rwds_out <= 0;
             recovery <= 0;
             data <= 0; configuring <= 0; writing <= 0;
             masked <= 0; upper <= 0;
@@ -186,8 +296,9 @@ module PsramController #(
                 configuring <= 1; writing <= 1;
                 state <= PREPARE;
             end
-            IDLE: if (read || write) begin
-                data <= din; writing <= write; configuring <= 0;
+            IDLE: if (req) begin
+                busy <= 1;
+                data <= din; writing <= we; configuring <= 0;
                 masked <= byte_write; upper <= addr[0];
                 state <= PREPARE;
             end
@@ -195,18 +306,11 @@ module PsramController #(
             ACTIVE: begin
                 case (phase)
                     0: begin
-                        if (ca_cycle) begin dq_drive <= 1; dq_out <= ca[47:40]; end
+                        if (ca_cycle) dq_drive <= 1;
                         else if (write_cycle) begin
-                            dq_drive <= 1; dq_out <= data[15:8];
+                            dq_drive <= 1;
                             rwds_drive <= !configuring;
-                            rwds_out <= masked && !upper;
                         end else begin dq_drive <= 0; rwds_drive <= 0; end
-                    end
-                    2: begin
-                        if (ca_cycle) dq_out <= ca[39:32];
-                        else if (write_cycle) begin
-                            dq_out <= data[7:0]; rwds_out <= masked && upper;
-                        end
                     end
                     3: begin
                         if (write_cycle || read_complete)
@@ -225,7 +329,7 @@ module PsramController #(
                 dq_drive <= 0; rwds_drive <= 0;
                 recovery <= 0; state <= RECOVER;
             end
-            RECOVER: if (recovery == RECOVERY_CYCLES-1) state <= IDLE;
+            RECOVER: if (recovery == RECOVERY_CYCLES-1) begin state <= IDLE; busy <= 0; end
                      else recovery <= recovery + 1'b1;
             default: ; // FAULT holds bus released until hardware reset.
         endcase

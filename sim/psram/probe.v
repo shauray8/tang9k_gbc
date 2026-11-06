@@ -55,7 +55,7 @@ module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0, MEM_MHZ = 81, STR
             else if (busy && ready && elapsed != 255) elapsed <= elapsed + 1'b1;
         end
         PsramController #(.FREQ(FREQ)) ctl (
-            .clk(mclk), .resetn(!rst), .read(req && !we), .write(req && we),
+            .clk(mclk), .resetn(!rst), .req(req), .we(we),
             .addr(addr), .din({wd, wd}), .byte_write(1'b1), .dout(word), .busy(busy), .debug(state),
             .O_psram_ck(O_psram_ck), .O_psram_ck_n(O_psram_ck_n),
             .O_psram_cs_n(O_psram_cs_n), .IO_psram_dq(IO_psram_dq), .IO_psram_rwds(IO_psram_rwds)
