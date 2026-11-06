@@ -94,8 +94,8 @@ module gb (
     wire rom_sel = ma[15] == 1'b0;
     wire cram_sel = ma[15:13] == 3'b101 && ram_en && cart_type != 2'd0;
     assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} : {5'b11111, rbank, ma[12:0]};
-    reg cyc_start;
-    always @(posedge clk) cyc_start <= ce;
+    reg cyc_start;                // also set right after reset: the first opcode fetch (0100) needs a request
+    always @(posedge clk) cyc_start <= ce || rst;
     assign ext_req = cyc_start && !rst && (rom_sel || cram_sel) &&
                      !(cpu_wr && !dma_act && rom_sel);                 // ROM writes are MBC registers
     assign ext_we = cpu_wr && !dma_act && cram_sel;
