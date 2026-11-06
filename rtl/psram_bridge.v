@@ -75,6 +75,15 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
         if (!mrst_n) can_launch <= 0;
         else can_launch <= st == 0 && m_ready && !c_busy;
     wire launch = can_launch && rq_s[1] != rq_seen;
+    reg capture_read;
+    always @(posedge mclk)
+        if (!mrst_n) capture_read <= 0;
+        else capture_read <= st == 2 && c_valid && !we_h;
+    // Capture one fabric clock after response detection. The source keeps its
+    // payload until the synchronized acknowledgement returns, so the byte select
+    // and controller word remain stable across this short pipeline stage.
+    always @(posedge mclk)
+        if (capture_read) m_q <= a_h[0] ? c_dout[15:8] : c_dout[7:0];
     reg counting, lat_full, lat_carry;
     // Registered lookahead keeps saturation and inter-nibble carry off the feedback path.
     always @(posedge mclk) begin
@@ -92,20 +101,24 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
             if (st == 2 && c_valid) counting <= 0;
         end
     end
+    // One outstanding request keeps launch disjoint from the command/response
+    // states. Generate the pulse directly rather than decoding IDLE a second time.
+    always @(posedge mclk) begin
+        c_rd <= mrst_n && launch && !we_h;
+        c_wr <= mrst_n && launch && we_h;
+    end
     always @(posedge mclk) begin
         rq_s <= {rq_s[0], rq_t};
-        c_rd <= 0; c_wr <= 0;
         if (!mrst_n) begin st <= 0; ak_t <= 0; m_ready <= 0; rq_s <= 0; rq_seen <= 0; end
         else begin
             if (!c_busy) m_ready <= 1;
             case (st)
                 2'd0: if (launch) begin
-                          c_rd <= !we_h; c_wr <= we_h; st <= 2'd1;
+                          st <= 2'd1;
                           rq_seen <= rq_s[1];
                       end
                 2'd1: st <= 2'd2;                       // controller registers the command
                 2'd2: if (c_valid) begin
-                    if (!we_h) m_q <= a_h[0] ? c_dout[15:8] : c_dout[7:0];
                     ak_t <= ~ak_t; st <= 2'd0;
                 end
             endcase

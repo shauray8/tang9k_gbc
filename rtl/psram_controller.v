@@ -159,9 +159,14 @@ module PsramController #(
             rx_enable <= state == ACTIVE && !writing && read_window && !phase[0];
             if (accept_request) begin first_valid <= 0; read_complete <= 0; end
             else if (rx_enable && !read_complete) begin
-                if (rwds_in) begin first_byte <= dq_in; first_valid <= 1; end
-                else if (!rwds_in && first_valid) begin dout <= {first_byte, dq_in}; read_complete <= 1; end
+                if (rwds_in) first_valid <= 1;
+                else if (!rwds_in && first_valid) read_complete <= 1;
             end
+            // Command acceptance is IDLE-only; rx_enable comes from ACTIVE.
+            // Their disjoint phases let data capture avoid the command-reset priority mux.
+            if (rx_enable && !read_complete && rwds_in) first_byte <= dq_in;
+            if (rx_enable && !read_complete && !rwds_in && first_valid)
+                dout <= {first_byte, dq_in};
         end
     end
 

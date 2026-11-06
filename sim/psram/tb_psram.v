@@ -1,7 +1,7 @@
 // Actual boot test and byte bridge exercised against an external-pin HyperRAM model.
 `timescale 1ps/1ps
 module tb #(parameter MEM_FREQ = 81_000_000, STRESS = 0);
-    localparam time MEM_HALF_PS = (500_000_000_000 + MEM_FREQ/2) / MEM_FREQ;
+    localparam time MEM_HALF_PS = (64'd500_000_000_000 + MEM_FREQ/2) / MEM_FREQ;
     reg mclk = 0, pclk = 0;
     always #(MEM_HALF_PS) mclk = ~mclk;
     always #18519 pclk = ~pclk; // 27 MHz system domain

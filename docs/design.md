@@ -6,7 +6,7 @@
 - Game Boy Color: 32 KiB banked WRAM, 16 KiB banked VRAM, CGB CPU startup registers and RGB555 rendering are implemented. KEY1/double-speed, HDMA and complete CGB bus/timing behavior remain unimplemented.
 - File-backed ROM banking supports MBC1/3/5. There is no physical cartridge interface. Audio, persistent saves, MBC3 RTC and broad mapper compatibility remain incomplete.
 
-**Checkpoint status:** `b183f65` is the last hardware-verified, flashed full-color build. The later memory work is an experimental checkpoint: the main design's memory fabric remains 81 MHz, but controller/bridge RTL has changed and has not been revalidated in the full FPGA design. Use `b183f65` for the known-good hardware build. No experimental memory probe was programmed onto the board.
+**Checkpoint status:** `b183f65` is the last hardware-verified, flashed full-color build. The later memory work is experimental: simulations and the default-clock full-design route pass, but the changed controller/bridge has not been revalidated on the physical board. The main design's memory fabric remains 81 MHz. Use `b183f65` for known-good hardware; no experimental memory image has been programmed.
 
 ## Reproducing the build
 
@@ -134,9 +134,9 @@ These are single-route results, not a multi-seed optimum. There are 1,505 LUTs l
 
 Capture remains isolated in `rtl/line_capture.v` and taps the PPU passively. Removing it and its UART commands can reclaim one BSRAM plus logic if later GBC features need the space; no removal delta has been measured.
 
-## Double-speed memory experiment (paused)
+## Double-speed memory experiment (hardware verification pending)
 
-The 81 MHz baseline cannot meet the double-speed CPU deadline: the first observed complete transaction took 703.722 ns against a 370.370 ns data-setup budget. Merely adding KEY1 would therefore be unsafe.
+The 81 MHz baseline cannot sustain double-speed requests: the first observed complete transaction took 703.722 ns, exceeding even the minimum 444.444 ns request interval (12 system clocks). The read-data setup budget is tighter still: 370.370 ns (10 clocks). Merely adding KEY1 would therefore be unsafe.
 
 The candidate keeps four-phase registered I/O, but targets 162 MHz fabric / 40.5 MHz memory CK. The PLL still uses a 648 MHz VCO; CLKOUTD/6 supplies the unchanged 27 MHz system clock. This frequency is not enabled in the main top level.
 
@@ -146,12 +146,30 @@ Changes in the checkpoint:
 - Read data is sampled continuously into the bridge output and again into the existing CPU input register. The CPU still uses a fixed cycle schedule; no fabricated fallback or memory wait-state workaround was added.
 - Timeout decode is registered one count early, the cycle counter scales with fabric frequency, and recovery preserves at least the modeled 36 ns requirement. Diagnostic-counter carry/saturation use registered lookahead.
 - The probe-only stress client writes 512 bytes across 256 LFSR word addresses before reading them all back. Reset changes its data pattern so stale contents from a preceding run cannot pass.
+- Receive data capture no longer inherits the command-reset priority decode: command acceptance and receive sampling occupy disjoint controller phases.
+- A one-fabric-clock bridge capture stage removes response decoding from the read-result register enable. Payload remains stable until acknowledgement crosses back; both normal-speed and double-speed deadline checks still pass.
+- Read/write command pulses use the existing launch predicate directly, without redundant IDLE decoding. The one-outstanding-request protocol prevents a second launch during command/response states.
+- Simulation clock arithmetic uses an explicit 64-bit picosecond constant for portability between Icarus and Verilator.
 
 The fast consumer regression issues 128 mixed reads/writes at twelve system clocks per request. It checks data before the CPU input register samples at clock ten, the byte consumed at clock eleven, and availability for the next request at clock twelve. Complete acknowledgement latency can reach 407.418 ns; it is separate from the earlier data-setup deadline. The normal-speed complete-acknowledgement assertion remains in place.
 
 The 15 pin-delay combinations passed the fast consumer/stress checks in simulation. Missing-strobe injection also checks that CS/CK are released before the device limit, no read acknowledgement is fabricated, and the bridge retains its timeout fault.
 
-**Hardware gate remains blocked:** the latest isolated stress probe uses 646 LUTs / 507 FFs, but post-route Fmax is **142.82 MHz**, below the required 162 MHz. The latest critical path runs from the bridge read-command register through receive-datapath enable logic to `dout.CE` (7.00 ns). This is not a hardware-proven double-speed memory path. No full-core route, physical fast-memory stress, KEY1 or HDMA implementation has been claimed for this checkpoint.
+A temporary full-core smoke also booted `cgb-acid2` and `dmg-acid2` through the actual bridge/controller and pin-level memory model at both 81 and 162 MHz fabric clocks. Each case matched all 23,040 reference pixels. The model was preloaded with ROM data; USB loading and physical I/O were not exercised. The CPU remained at normal speed: this is not a KEY1/double-speed gameplay result.
+
+The isolated stress probe now uses **647 LUTs / 508 FFs**. The selected default route meets the 162 MHz requirement, but placement sensitivity remains:
+
+| Placement seed | Post-route memory Fmax | 162 MHz constraint |
+|---|---:|---|
+| Default (0) | 168.72 MHz | Pass |
+| 1 | 117.33 MHz | Fail |
+| 2 | 155.47 MHz | Fail |
+
+Only the timing-clean default-route bitstream is a hardware-test candidate. These results do not establish seed-independent closure or physical I/O margin.
+
+The full color design was also rebuilt with its unchanged **81 MHz** memory clock into `build/fpga-memory81/gb.fs`: 7,117 LUTs, 2,238 FFs and 26 BSRAM blocks. Post-route Fmax: system 32.68 MHz (required 27), memory 133.17 MHz (required 81), video 94.02 MHz (required 74.25). This is an offline build result, not a new hardware verification.
+
+**Hardware gate remains blocked:** the USB client reports the board missing, and independent macOS IOUSB enumeration shows no FTDI board. Physical fast-memory stress, full-core 162 MHz integration, KEY1 and HDMA remain unverified/unimplemented. The known-good flash image is unchanged.
 
 Reproduce the checks:
 
@@ -161,7 +179,7 @@ MEM_FREQ=162000000 STRESS=1 bash sim/psram/run.sh sweep
 make psram-probe PROBE_BRIDGE=1 PROBE_MEM_MHZ=162 PROBE_STRESS=1
 ```
 
-The last command currently fails timing intentionally rather than producing an accepted bitstream. Resume by closing that measured path, then run physical stress with SRAM-only programming and restore the verified color image before integrating any clock change.
+The isolated default-route probe now packs successfully. Reconnect the board, run physical stress with SRAM-only programming, and restore the verified color image before integrating a clock change. Alternative seeds above must not be programmed with failed timing.
 
 
 ## GBC accuracy targets
