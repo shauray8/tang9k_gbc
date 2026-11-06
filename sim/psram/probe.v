@@ -1,5 +1,5 @@
 // Volatile memory diagnostic. No CPU/video; the flashed game image is unchanged.
-// FAST: 81 MHz memory fabric instead of 27 MHz. BRIDGE: actual 25.2-to-81 MHz bridge.
+// FAST: 81 MHz memory fabric instead of 27 MHz. BRIDGE: actual 27-to-81 MHz bridge.
 // UART remains at clk27. 'R' physically resets/retests memory; 'D' reports stable test results.
 module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0) (
     input clk27, uart_rx,
@@ -9,16 +9,14 @@ module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0) (
     inout [1:0] IO_psram_rwds
 );
     localparam FREQ = (FAST || BRIDGE) ? 81_000_000 : 27_000_000;
-    wire mclk, mlock, tclk, tlock;
+    wire mclk, mlock, tclk, tlock, sys27;
     generate if (FAST || BRIDGE) begin: fast_clock
-        pll_psram pll (.clock_in(clk27), .clock_out(mclk), .locked(mlock));
+        pll_psram pll (.clock_in(clk27), .clock_out(mclk), .clock_sys(sys27), .locked(mlock));
     end else begin: direct_clock
-        assign mclk = clk27; assign mlock = 1'b1;
+        assign mclk = clk27; assign mlock = 1'b1; assign sys27 = clk27;
     end endgenerate
     generate if (BRIDGE) begin: system_clock
-        wire fclk;
-        pll_126 pll (.clock_in(clk27), .clock_out(fclk), .locked(tlock));
-        CLKDIV #(.DIV_MODE("5")) div (.HCLKIN(fclk), .RESETN(tlock), .CALIB(1'b0), .CLKOUT(tclk));
+        assign tclk = sys27; assign tlock = mlock;
     end else begin: memory_test_clock
         assign tclk = mclk; assign tlock = 1'b1;
     end endgenerate

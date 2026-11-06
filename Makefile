@@ -7,8 +7,8 @@ export PATH := $(TOOLS):$(PATH)
 
 ROM    ?=
 BUILD  := build/fpga
-RTL    := rtl/top.v rtl/pll_126.v rtl/pll_psram.v rtl/hdmi.v rtl/spi_rom_loader.v rtl/cart_loader.v rtl/psram_bridge.v rtl/psram_controller.v rtl/uart_rx.v rtl/uart_tx.v rtl/gb.v rtl/sm83.v rtl/timer.v rtl/ppu.v
-RTL += rtl/psram_test.v rtl/line_capture.v
+RTL    := rtl/top.v rtl/pll_video.v rtl/pll_psram.v rtl/hdmi.v rtl/spi_rom_loader.v rtl/cart_loader.v rtl/psram_bridge.v rtl/psram_controller.v rtl/uart_rx.v rtl/uart_tx.v rtl/gb.v rtl/sm83.v rtl/timer.v rtl/ppu.v
+RTL += rtl/psram_test.v rtl/line_capture.v rtl/video_buffer.v
 CST    := boards/tangnano9k/tangnano9k.cst
 SDC    := boards/tangnano9k/tangnano9k.sdc
 DEVICE := GW1NR-LV9QN88PC6/I5
@@ -21,11 +21,11 @@ all: bitstream
 
 $(BUILD)/gb.json: $(RTL) Makefile
 	@mkdir -p $(BUILD)
-	cd $(BUILD) && yosys -q -l yosys.log -p "read_verilog $(addprefix $(CURDIR)/,$(RTL)); synth_gowin -noalu -top top -json gb.json"
+	cd $(BUILD) && yosys -q -l yosys.log -p "read_verilog $(addprefix $(CURDIR)/,$(RTL)); synth_gowin -noalu -nowidelut -top top -json gb.json"
 
 $(BUILD)/pnr.json: $(BUILD)/gb.json $(CST) $(SDC)
 	nextpnr-himbaechel -l $(BUILD)/pnr.log --json $< --write $@ --device $(DEVICE) \
-	  --vopt family=$(FAMILY) --vopt cst=$(CST) --sdc $(SDC) --freq 25.2 2>&1 | tee $(BUILD)/pnr.console.log
+	  --vopt family=$(FAMILY) --vopt cst=$(CST) --sdc $(SDC) --freq 27 2>&1 | tee $(BUILD)/pnr.console.log
 
 $(BUILD)/gb.fs: $(BUILD)/pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<
@@ -54,7 +54,7 @@ PROBE_FAST ?= 0
 PROBE_BRIDGE ?= 0
 PROBE_SYNC ?= 0
 PROBE_BUILD := build/psram_probe$(if $(filter 1,$(PROBE_BRIDGE)),bridge$(if $(filter 1,$(PROBE_SYNC)),sync,),$(if $(filter 1,$(PROBE_FAST)),81,))
-PROBE_RTL := sim/psram/probe.v rtl/psram_controller.v rtl/psram_bridge.v rtl/psram_test.v rtl/uart_rx.v rtl/uart_tx.v rtl/pll_psram.v rtl/pll_126.v
+PROBE_RTL := sim/psram/probe.v rtl/psram_controller.v rtl/psram_bridge.v rtl/psram_test.v rtl/uart_rx.v rtl/uart_tx.v rtl/pll_psram.v
 PROBE_CST := boards/tangnano9k/psram_probe.cst
 # Constrain every probe clock conservatively to the fastest selected domain.
 PROBE_MHZ := $(if $(filter 1,$(PROBE_FAST) $(PROBE_BRIDGE)),81,27)

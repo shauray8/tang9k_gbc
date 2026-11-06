@@ -8,6 +8,7 @@ module gb (
     // video out (one pixel per pix_we)
     output            pix_we,
     output     [1:0]  pix,
+    output     [14:0] pix_rgb,          // native CGB RGB555: {blue, green, red}
     output     [7:0]  pix_x,
     output     [7:0]  pix_y,
     output            vsync,
@@ -40,7 +41,7 @@ module gb (
 
     sm83 cpu (
         .clk(clk), .rst(rst), .ce(ce), .addr(a), .dout(cpu_dout), .wr(cpu_wr), .rd(cpu_rd),
-        .din(cpu_din), .irq(irq), .halted(), .pc_dbg(pc_dbg)
+        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .halted(), .pc_dbg(pc_dbg)
     );
 
     wire wr_now = ce && cpu_wr;
@@ -140,7 +141,8 @@ module gb (
     wire [7:0] ppu_q;
     wire vram_sel = a[15:13] == 3'b100;
     wire oam_sel  = a[15:8] == 8'hFE && a[7:0] < 8'hA0;
-    wire preg_sel = a[15:4] == 12'hFF4 && (a[3:0] <= 4'hB && a[3:0] != 4'h6 || a[3:0] == 4'hF); // + FF4F VBK
+    wire preg_sel = (a[15:4] == 12'hFF4 && (a[3:0] <= 4'hB && a[3:0] != 4'h6 || a[3:0] == 4'hF)) ||
+                    (a >= 16'hFF68 && a <= 16'hFF6C);
     wire ppu_vblank, ppu_stat;
     // ROM/cart RAM/WRAM (VRAM source unsupported); WRAM sources follow SVBK and the echo map via ma
     wire [7:0] dma_data = (dma_src[15:14] == 2'b11) ? wram_q : ext_rd;
@@ -151,7 +153,7 @@ module gb (
         .vram_sel(vram_sel), .oam_sel(oam_sel), .reg_sel(preg_sel),
         .dma_act(dma_act), .dma_we(dma_act && ce), .dma_idx(dma_idx), .dma_data(dma_data),
         .irq_vblank(ppu_vblank), .irq_stat(ppu_stat),
-        .pix_we(pix_we), .pix(pix), .pix_x(pix_x), .pix_y(pix_y), .vsync(vsync), .lcd_on(lcd_on)
+        .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(pix_x), .pix_y(pix_y), .vsync(vsync), .lcd_on(lcd_on)
     );
 
     always @(posedge clk) begin

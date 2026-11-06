@@ -8,6 +8,7 @@ module sm83 (
     input             clk,
     input             rst,
     input             ce,
+    input             cgb_mode, // selects documented post-boot CPU state; stable through reset
     output reg [15:0] addr,
     output reg [7:0]  dout,
     output reg        wr,
@@ -56,17 +57,24 @@ module sm83 (
 
     // 8-bit ALU: returns {Z,N,H,C,result}
     function [11:0] alu(input [2:0] op, input [7:0] a, input [7:0] b, input cin);
-        reg [8:0] r; reg [4:0] h;
+        reg sub, carry_in;
+        reg [7:0] operand, arithmetic, result;
+        reg [4:0] lo, hi;
         begin
+            // One nibble-split adder supplies both result and half/full carry.
+            // Subtraction uses A + ~B + !borrow; architectural carry then denotes borrow.
+            sub = op == 3'd2 || op == 3'd3 || op == 3'd7;
+            carry_in = sub ^ ((op == 3'd1 || op == 3'd3) && cin);
+            operand = b ^ {8{sub}};
+            lo = {1'b0, a[3:0]} + {1'b0, operand[3:0]} + carry_in;
+            hi = {1'b0, a[7:4]} + {1'b0, operand[7:4]} + lo[4];
+            arithmetic = {hi[3:0], lo[3:0]};
             case (op)
-                3'd0: begin h = a[3:0] + b[3:0];        r = a + b;        alu = {r[7:0]==0, 1'b0, h[4], r[8], r[7:0]}; end
-                3'd1: begin h = a[3:0] + b[3:0] + cin;  r = a + b + cin;  alu = {r[7:0]==0, 1'b0, h[4], r[8], r[7:0]}; end
-                3'd2: begin h = {1'b0,a[3:0]} - {1'b0,b[3:0]};       r = {1'b0,a} - {1'b0,b};       alu = {r[7:0]==0, 1'b1, h[4], r[8], r[7:0]}; end
-                3'd3: begin h = {1'b0,a[3:0]} - {1'b0,b[3:0]} - cin; r = {1'b0,a} - {1'b0,b} - cin; alu = {r[7:0]==0, 1'b1, h[4], r[8], r[7:0]}; end
-                3'd4: begin r = a & b; alu = {r[7:0]==0, 1'b0, 1'b1, 1'b0, r[7:0]}; end
-                3'd5: begin r = a ^ b; alu = {r[7:0]==0, 1'b0, 1'b0, 1'b0, r[7:0]}; end
-                3'd6: begin r = a | b; alu = {r[7:0]==0, 1'b0, 1'b0, 1'b0, r[7:0]}; end
-                default: begin h = {1'b0,a[3:0]} - {1'b0,b[3:0]}; r = {1'b0,a} - {1'b0,b}; alu = {r[7:0]==0, 1'b1, h[4], r[8], a}; end
+                3'd4: begin result = a & b; alu = {result == 0, 3'b010, result}; end
+                3'd5: begin result = a ^ b; alu = {result == 0, 3'b000, result}; end
+                3'd6: begin result = a | b; alu = {result == 0, 3'b000, result}; end
+                default: alu = {arithmetic == 0, sub, lo[4] ^ sub, hi[4] ^ sub,
+                                op == 3'd7 ? a : arithmetic};
             endcase
         end
     endfunction
@@ -132,7 +140,10 @@ module sm83 (
 
     always @(posedge clk) begin
         if (rst) begin
-            A = 8'h01; F = 8'hB0; B = 0; C = 8'h13; D = 0; E = 8'hD8; H = 8'h01; L = 8'h4D;
+            A = cgb_mode ? 8'h11 : 8'h01; F = cgb_mode ? 8'h80 : 8'hB0;
+            B = 0; C = cgb_mode ? 8'h00 : 8'h13;
+            D = cgb_mode ? 8'hFF : 8'h00; E = cgb_mode ? 8'h56 : 8'hD8;
+            H = cgb_mode ? 8'h00 : 8'h01; L = cgb_mode ? 8'h0D : 8'h4D;
             SP = 16'hFFFE; PC = 16'h0100; IR = 0; Z = 0; W = 0; // post-boot-ROM state
             mc = 0; IME = 0; ime_delay = 0; halt = 0; intm = 0; IF = 0; IE = 0;
             addr <= 16'h0100; wr <= 0; rd <= 1; dout <= 0;
@@ -177,6 +188,12 @@ module sm83 (
                         IR = d; PC = PC + 1;
                     end
                     op = IR;
+                    // Select operands before execution, so immediate and register/memory
+                    // instructions share one ALU rather than separate function expansions.
+                    ar = alu(op[5:3], A,
+                             op[7:6] == 2'b10 && op[2:0] != 3'd6 ? getr(op[2:0]) : d, fC);
+                    cbop = mc == 3'd1 ? d : W;
+                    cr = cbx(cbop, mc == 3'd1 ? getr(cbop[2:0]) : d, F);
                     casez (op)
                     // ---------------- 0x00-0x3F ----------------
                     8'h00, 8'h10: begin if (op == 8'h10) PC = PC + 1; fetch; end
@@ -303,7 +320,6 @@ module sm83 (
                     8'b10??????: begin
                         if (op[2:0] == 3'd6 && mc == 0) rdm({H, L});
                         else begin
-                            ar = alu(op[5:3], A, op[2:0] == 3'd6 ? d : getr(op[2:0]), fC);
                             A = ar[7:0]; F = {ar[11:8], 4'b0};
                             fetch;
                         end
@@ -312,7 +328,6 @@ module sm83 (
                     8'b11???110: case (mc) // ALU A,n
                         0: imm;
                         default: begin
-                            ar = alu(op[5:3], A, d, fC);
                             A = ar[7:0]; F = {ar[11:8], 4'b0};
                             fetch;
                         end
@@ -378,14 +393,12 @@ module sm83 (
                             cbop = d; W = d;
                             if (cbop[2:0] == 3'd6) rdm({H, L});
                             else begin
-                                cr = cbx(cbop, getr(cbop[2:0]), F);
                                 F = {cr[12:9], 4'b0};
                                 if (cr[0]) setr(cbop[2:0], cr[8:1]);
                                 fetch;
                             end
                         end
                         2: begin
-                            cr = cbx(W, d, F);
                             F = {cr[12:9], 4'b0};
                             if (W[7:6] == 2'd1) fetch; else wrm({H, L}, cr[8:1]);
                         end

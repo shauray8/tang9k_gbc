@@ -3,7 +3,7 @@
 module tb;
     reg mclk = 0, pclk = 0;
     always #6173 mclk = ~mclk;
-    always #19841 pclk = ~pclk;
+    always #18519 pclk = ~pclk; // 27 MHz system domain
     reg [7:0] mpor = 0;
     always @(posedge mclk) if (!mpor[7]) mpor <= mpor + 1;
     wire mrst_n = mpor[7];
@@ -71,8 +71,8 @@ module tb;
         end
     endtask
 
-    // Data must arrive two pixel clocks before the shortest DMG M-cycle
-    // (23 pixel clocks). Include the full request/acknowledge CDC round trip.
+    // Data must arrive two system clocks before the shortest DMG M-cycle
+    // (25 system clocks at 27 MHz). Include the complete CDC round trip.
     time started = 0, max_roundtrip = 0;
     reg prev_busy = 0;
     always @(posedge pclk) begin
@@ -80,7 +80,7 @@ module tb;
         if ((boot ? t_req : req) && !b_busy) started = $time;
         if (prev_busy && !b_busy) begin
             if ($time - started > max_roundtrip) max_roundtrip = $time - started;
-            if ($time - started > 833333) $fatal(1, "DMG bus deadline exceeded: %0t ps", $time - started);
+            if ($time - started > 851852) $fatal(1, "DMG bus deadline exceeded: %0t ps", $time - started);
         end
     end
     integer i;

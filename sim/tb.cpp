@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
     Vgb *g = new Vgb;
     g->cart_type = cart; g->rom_mask = banks - 1; g->ram_mask = rb ? rb - 1 : 0;
     g->cgb_mode = (ext[0x143] & 0x80) != 0;
-    static unsigned char fb[144][160];
+    static unsigned short fb[144][160];
     memset(fb, 0, sizeof fb);
     std::string ser;
     g->clk_en = 1; g->buttons = 0; g->rst = 1; g->ext_rd = 0xFF;
@@ -42,13 +42,14 @@ int main(int argc, char **argv) {
     long long ticks = 0, max_ticks = (long long)max_frames * 70224;
     long acc = 0;
     while (ticks < max_ticks) {
-        // same fractional enable as hardware: 70224 GB dots per 420000 pixel clocks
-        acc += 70224; g->clk_en = acc >= 420000; if (g->clk_en) { acc -= 420000; ticks++; }
+        // Same fractional enable as the 27 MHz system domain.
+        acc += 70224; g->clk_en = acc >= 450000; if (g->clk_en) { acc -= 450000; ticks++; }
         g->clk = 0; g->eval();
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
         g->clk = 1; g->eval();
         if (req) { if (we) ext[addr] = wd; else g->ext_rd = ext[addr]; }
-        if (g->pix_we && g->pix_y < 144 && g->pix_x < 160) fb[g->pix_y][g->pix_x] = g->pix;
+        if (g->pix_we && g->pix_y < 144 && g->pix_x < 160)
+            fb[g->pix_y][g->pix_x] = g->cgb_mode ? g->pix_rgb : g->pix;
         if (g->vsync) {
             frames++;
             int m = 0;
@@ -71,7 +72,16 @@ int main(int argc, char **argv) {
     fprintf(f, "P6 160 144 255\n");
     static const unsigned char shade[4] = {0xE0, 0xA8, 0x58, 0x10};
     for (int y = 0; y < 144; y++) for (int x = 0; x < 160; x++) {
-        unsigned char s = shade[fb[y][x] & 3]; fputc(s, f); fputc(s, f); fputc(s, f);
+        if (g->cgb_mode) {
+            unsigned v = fb[y][x];
+            for (int shift : {0, 5, 10}) {
+                unsigned c = (v >> shift) & 31;
+                fputc((c << 3) | (c >> 2), f);
+            }
+        } else {
+            unsigned char s = shade[fb[y][x] & 3];
+            fputc(s, f); fputc(s, f); fputc(s, f);
+        }
     }
     fclose(f);
     printf("\n[tb] ticks=%lld frames=%d pc=%04x\n", ticks, frames, g->pc_dbg);

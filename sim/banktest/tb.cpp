@@ -33,10 +33,10 @@ int main(int argc, char **argv) {
     long long t = 0;
     long acc = 0;
     while (t < max_ticks) {
-        // Match the real 25.2 MHz domain and its 5–6-clock spacing between GB dots.
+        // Match the 27 MHz system domain and its fractional dot enable.
         acc += 70224;
-        g->clk_en = acc >= 420000;
-        if (g->clk_en) { acc -= 420000; t++; }
+        g->clk_en = acc >= 450000;
+        if (g->clk_en) { acc -= 450000; t++; }
         g->clk = 0; g->eval();
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
         g->clk = 1; g->eval();

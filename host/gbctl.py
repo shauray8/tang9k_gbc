@@ -8,11 +8,16 @@ talks to the bridge's UART endpoints directly over libusb (bundled with the tool
                            checksum-verified; ~11 s per 128 KB at 115200 baud
   gbctl.py status          print core/loader state (PSRAM ready, load progress, LCD, lock)
   gbctl.py diagnose        print boot-memory address, expected/actual bytes, and controller state
+  gbctl.py scanout         read the completed HDMI game-window fingerprint and frame counter
   gbctl.py play            open a window; keyboard = joypad (window must have focus)
                            arrows = D-pad, Z = A, X = B, Enter = Start, Backspace/Shift = Select
   gbctl.py screenshot out.ppm
                            read the live LCD back over the UART (no HDMI needed) into a 160x144
-                           PPM; one line per frame, so the image is rolling (~3-6 s), not atomic
+                           PPM of 2-bit DMG shades; one line per frame, so the image is rolling
+                           (~3-6 s), not atomic
+  gbctl.py screenshot-color out.ppm
+                           same, but the PPU's native RGB555 colors (Game Boy Color), expanded to
+                           8 bits per channel; rolling, ~8-12 s
 """
 import ctypes, os, sys, time
 
@@ -26,8 +31,10 @@ KEYS = {"Right": "right", "Left": "left", "Up": "up", "Down": "down", "z": "a", 
         "x": "b", "X": "b", "Return": "start", "BackSpace": "select", "Shift_L": "select",
         "Shift_R": "select"}
 SHADES = (b"\xe0\xf8\xd0", b"\x88\xc0\x70", b"\x34\x68\x56", b"\x08\x18\x20")   # rtl/top.v DMG shades
-CAP_ERR = {1: "core held in reset (no game loaded, or still loading)", 2: "LCD is off",
-           3: "line not drawn within ~83 ms (core stalled?)", 4: "line out of range"}
+CAP_ERR = {1: "core held in reset (no game loaded, or still loading)",
+           2: "LCD is off (or was switched off during the capture)",
+           3: "line not drawn within 2^21 clocks, ~80 ms (core stalled?)", 4: "line out of range"}
+EXPAND5 = bytes((c << 3) | (c >> 2) for c in range(32))   # RGB555 channel -> 8 bits
 
 
 class Link:
@@ -195,19 +202,30 @@ def diagnose(link):
             print(f"ROM header readback: 0x104={a:02x} 0x105={b:02x} (expected ce ed)")
 
 
-def capture_line(link, y):
-    """'V' <y> -> 'V' <y> <40 bytes, 4 px/byte, MSB first> <sum8>, or 'v' <error code>."""
+def _capture(link, cmd, y, n, valid):
+    """Send cmd <y>; accept cmd <y> <n data bytes> <sum8> if valid(data), or exit on 'v' <code>."""
     r = b""
     for _ in range(3):
-        link.write(bytes([ord("V"), y]))
-        r = link.read(0.5, lambda b: len(b) >= 43 or (b[:1] == b"v" and len(b) >= 2))
+        link.write(cmd + bytes([y]))
+        r = link.read(0.5, lambda b: len(b) >= n + 3 or (b[:1] == b"v" and len(b) >= 2))
         if r[:1] == b"v" and len(r) == 2:
             sys.exit(f"screenshot failed at line {y}: {CAP_ERR.get(r[1], f'error code {r[1]}')}")
-        if len(r) == 43 and r[0] == ord("V") and r[1] == y and sum(r[2:42]) & 0xFF == r[42]:
-            return r[2:42]
+        if (len(r) == n + 3 and r[:1] == cmd and r[1] == y and sum(r[2:-1]) & 0xFF == r[-1]
+                and valid(r[2:-1])):
+            return r[2:-1]
         link.read(0.1)                    # discard the rest of a garbled reply before retrying
     sys.exit(f"screenshot failed at line {y}: no valid reply after 3 attempts (last {r!r}); "
              "is the current design flashed?")
+
+
+def capture_line(link, y):
+    """'V' <y> -> 'V' <y> <40 bytes, 4 px/byte, MSB first> <sum8>, or 'v' <error code>."""
+    return _capture(link, b"V", y, 40, lambda d: True)
+
+
+def capture_line_color(link, y):
+    """'W' <y> -> 'W' <y> <160 RGB555 pixels, little-endian, bit 15 = 0> <sum8>, or 'v' <code>."""
+    return _capture(link, b"W", y, 320, lambda d: all(h < 0x80 for h in d[1::2]))
 
 
 def screenshot(link, path):
@@ -221,8 +239,36 @@ def screenshot(link, path):
           "(rolling capture: each line from a later frame than the one above)")
 
 
+def screenshot_color(link, path):
+    t = time.time()
+    link.read(0.05)                       # drop stale bytes so replies start frame-aligned
+    rows = []
+    for y in range(144):
+        d = capture_line_color(link, y)
+        for lo, hi in zip(d[0::2], d[1::2]):
+            c = lo | hi << 8
+            rows.append(bytes((EXPAND5[c & 31], EXPAND5[(c >> 5) & 31], EXPAND5[(c >> 10) & 31])))
+    with open(path, "wb") as f:
+        f.write(b"P6\n160 144\n255\n" + b"".join(rows))
+    print(f"wrote {path}: 160x144 RGB555 in {time.time() - t:.1f}s "
+          "(rolling capture: each line from a later frame than the one above)")
+
+def scanout(link):
+    """Fingerprint of the scaled RGB pixels, after the dual-clock video buffer (not HDMI capture)."""
+    link.read(0.05)
+    link.write(b"F")
+    reply = link.read(0.3, lambda d: len(d) >= 4)
+    if len(reply) != 4 or reply[0] != ord("F"):
+        sys.exit(f"invalid scanout reply: {reply!r}")
+    frame, signature = reply[1], int.from_bytes(reply[2:4], "big")
+    print(f"scanout frame={frame} fingerprint={signature:04x} (16-bit, not collision-free)")
+    return frame, signature
+
+
+
 if __name__ == "__main__":
-    cmds = {"load": 3, "play": 2, "status": 2, "diagnose": 2, "screenshot": 3}
+    cmds = {"load": 3, "play": 2, "status": 2, "diagnose": 2, "scanout": 2,
+            "screenshot": 3, "screenshot-color": 3}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds or len(sys.argv) < cmds[sys.argv[1]]:
         sys.exit(__doc__)
     link = Link()
@@ -233,8 +279,12 @@ if __name__ == "__main__":
             play(link)
         elif sys.argv[1] == "diagnose":
             diagnose(link)
+        elif sys.argv[1] == "scanout":
+            scanout(link)
         elif sys.argv[1] == "screenshot":
             screenshot(link, sys.argv[2])
+        elif sys.argv[1] == "screenshot-color":
+            screenshot_color(link, sys.argv[2])
         else:
             status(link)
     finally:

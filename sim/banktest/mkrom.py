@@ -122,10 +122,12 @@ class Asm:
             self.call('send')
 
 
-def start(a):
+def start(a, cgb=False):
+    a.st(0xFF90)                    # preserve boot A before the test changes it
     a.emit(0xF3)                     # DI
     a.w16(0x31, 0xFFFE)              # LD SP,FFFE
     a.emit(0x1E, 0x00)               # LD E,0
+    a.chk(0xFF90, 0x11 if cgb else 0x01, 'Boot A identifies the selected CPU model')
     a.wr(0xFF40, 0x00)               # LCD off: VRAM/OAM freely accessible
     for i, v in enumerate(DMA_ROUTINE):
         a.wr(0xFF80 + i, v)
@@ -241,7 +243,7 @@ def dmg_program(a):
 
 
 def cgb_program(a):
-    start(a)
+    start(a, cgb=True)
     a.chk(0xFF70, 0xF8, 'CGB: SVBK resets to 0 (reads F8)')
     a.chk(0xFF4F, 0xFE, 'CGB: VBK resets to 0 (reads FE)')
     a.wr(0xC000, 0xC0)
