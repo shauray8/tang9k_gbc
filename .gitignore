@@ -1,6 +1,7 @@
 # Downloaded tools, local ROM collections, and generated FPGA/simulator outputs.
 /build
 /tools
+/docs/design.md
 /roms
 *.gb
 *.gbc
