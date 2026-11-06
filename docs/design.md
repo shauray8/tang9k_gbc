@@ -2,8 +2,8 @@
 
 ## Target and scope
 - Board: Sipeed Tang Nano 9K, Gowin GW1NR-LV9QN88PC6/I5: 8640 LUT4, 6480 FF, 26 BSRAM blocks (18 Kbit each), 64 Mbit PSRAM, 32 Mbit SPI flash, HDMI connector.
-- Game Boy Advance: feasibility is unproven; no synthesized GBA implementation or measured fit exists in this project.
-- Game Boy Color: planned, not implemented. Double-speed CPU and color PPU need separate memory-bandwidth and logic-budget verification.
+- Goal: accurate Game Boy Color emulation with DMG compatibility. Game Boy Advance is out of scope.
+- Game Boy Color: 32 KiB banked WRAM and 16 KiB banked VRAM are implemented. Full GBC emulation is not: the CPU still has DMG post-boot state, rendering is monochrome/bank 0, and speed switching, color attributes/palettes and HDMA remain unimplemented.
 - Current build: DMG with file-backed ROM banking for MBC1/3/5. No physical cartridge interface. MBC3 RTC and broad mapper compatibility remain incomplete.
 
 ## Reproducing the build
@@ -19,6 +19,19 @@ make rom ROM="/path/to/your/game.gb"
 ```
 
 No ROMs or downloaded tools are bundled. For keyboard control, focus the pad window: arrows, Z/A, X/B, Enter/Start, Backspace/Select. Close that window before running `host/gbctl.py status`, `diagnose`, or `load`. `sim/psram/run.sh sweep` needs no ROM; `sim/run.sh /path/to/test.gb 600` runs a supplied ROM in the core simulation.
+
+## Headless pixel readback
+
+With no HDMI monitor attached, capture the running FPGA's 160×144 game image over the same USB cable:
+
+```bash
+/usr/bin/python3 host/gbctl.py screenshot build/screen.ppm
+```
+
+Close the keyboard pad first: the UART interface has one owner. This reads actual PPU pixels, not a host emulator or a simulated screenshot. It does not verify the HDMI serializer, electrical output, border overlays, or monitor compatibility. A screen takes approximately 2.5–3.1 seconds at 115200 baud; lines come from successive frames, so moving scenes can show rolling artifacts.
+
+`V <y>` captures pixels 0–159 of scanline y without stopping the game. Reply: `V <y> <40 packed bytes> <sum8>`, with four 2-bit shades per byte, MSB first. `v <code>` reports reset/loading (1), LCD off (2), missing line within about 83 ms (3), or invalid line (4). The host checks line number/checksum and writes no image if capture fails. The 40-byte capture buffer is distributed RAM; UART FIFO backpressure prevents dropped reply bytes. `sim/capture/run.sh` exercises capture/TX/RX, packing, backpressure, interrupted lines and errors.
+
 
 ## PSRAM boot diagnostic
 - Before loading a ROM, `rtl/psram_test.v` writes bytes `00 FF AA 55 12 34 81 6E` to addresses `000000..000003` and `200000..200003`, then reads all eight back. This checks adjacent byte lanes and one high address bit; it is not an exhaustive RAM test.
@@ -78,28 +91,64 @@ flowchart LR
 | Use | Blocks |
 |---|---|
 | Cartridge ROM / RAM in PSRAM | 0 |
-| WRAM 8 KB | 4 |
-| VRAM 8 KB | 4 |
+| WRAM 32 KiB (8 × 4 KiB banks) | 16 |
+| VRAM 16 KiB (2 × 8 KiB banks) | 8 |
 | Ring buffer 8192×2 | 1 |
-| **Total** | **9 / 26** |
+| Headless scanline capture, HRAM and OAM (distributed RAM) | 0 |
+| **Total** | **25 / 26** |
 
-OAM DMA owns the ROM/WRAM bus while active and the CPU sees only HRAM/IO, as on hardware. Every memory stays single-ported.
+OAM DMA currently keeps DMG-style CPU bus lockout. WRAM source reads use the selected SVBK bank and the same echo mapping as CPU accesses. CGB-specific separate-bus arbitration and VRAM DMA sources are not yet implemented; E0/F0 DMA regression cases describe this core's current undocumented-source behavior, not verified CGB hardware behavior.
+
+## GBC banking checks
+
+The loader captures ROM header `0x143` bit 7 and passes it to the core as `cgb_mode`. In that mode, FF70 selects WRAM banks 1–7 (stored 0 aliases bank 1); C000–CFFF stays bank 0 and E000–FDFF mirrors the corresponding WRAM locations. FF4F selects CPU VRAM bank 0/1. In DMG mode these register writes are ignored and reads return FF. The PPU still fetches bank 0 regardless of CPU VBK.
+
+`sim/banktest/run.sh` generates original DMG/CGB ROMs into `build/banktest`, then executes their assertions on the real CPU. They check bank isolation, boundary/echo accesses, zero-bank aliasing, DMA bank selection and mode-3 VRAM lockouts. Passing requires serial `Passed` plus a complete shade-1 frame while CPU VBK=1; failures emit a numbered check and shade 3. The generated ROMs deliberately contain no Nintendo logo, so their header-logo diagnostic being false is expected. They can also be uploaded with `gbctl.py load`.
+
+## Synthesis and remaining budget
+
+The default build uses `synth_gowin -noalu`. With banking and capture added, carry-chain mapping used 7,988 LUTs and failed legal placement. LUT arithmetic removed that placement bottleneck, but initially missed the 81 MHz constraint in the bridge's saturating diagnostic counter. Splitting that counter into independently enabled nibbles preserves its count and shortens the feedback path.
+
+| Post-route metric | Earlier DMG build | Banked memory + USB capture |
+|---|---:|---:|
+| LUT4 | 7,426 / 8,640 | 7,430 / 8,640 |
+| Flip-flops | 1,765 / 6,480 | 1,827 / 6,480 |
+| BSRAM blocks | 9 / 26 | 25 / 26 |
+| System-clock Fmax; required 25.2 MHz | 41.94 MHz | 27.42 MHz |
+| Memory-clock Fmax; required 81 MHz | 156.94 MHz | 101.55 MHz |
+
+These are single-route results, not a multi-seed optimum. Only one BSRAM block remains: widening the existing ring directly to 15-bit RGB will not fit alongside these memories. Full GBC needs a measured video-storage strategy, color rendering, correct CGB CPU state, HDMA and a proven double-speed memory deadline.
+
+The capture logic is isolated in `rtl/line_capture.v` and taps the PPU passively. Keep it during development; remove it and its UART command path if GBC logic needs the space. The current mapped capture-module subtotal is 147 LUT1–LUT4 primitives, 7 wide muxes, 71 flip-flops and 6 RAM16SDP4 cells, plus shared UART/control logic. This is not a measured whole-design removal delta; placement/remapping can change the saving. It uses no BSRAM, so dropping capture does not solve the color-buffer memory limit.
+
+## GBC accuracy targets
+
+- Priorities: color-buffer/storage fit without reducing WRAM/VRAM; CGB CPU startup and color rendering; KEY1/double-speed and HDMA timing; audio, persistent saves, RTC and mapper coverage. Preserve DMG behavior at each step.
+- Maximum-ROM gameplay target: the user-provided `../Densha de Go! 2 (J) [C][!].gbc`, 8,388,608 bytes, CGB flag C0, mapper 1B (MBC5+RAM+battery), 32 KiB cartridge RAM. SHA-256: `aaf85dc22020cc7103bfcacb0bdd54568d4b391a0483fd3e11f18cd35c9c05a6`, matching the [documented cartridge dump](https://gbhwdb.gekkio.fi/cartridges/CGB-B82J-0/gekkio-1.html). The ROM stays outside Git.
+- Densha is not yet loadable: the current 22-bit cartridge path reserves the top 128 KiB of its 4 MiB window for save RAM, leaving 3.875 MiB for ROM. An 8 MiB ROM plus its 32 KiB save RAM requires a new backing-storage plan, not simply increasing the loader limit.
+- ROM size is a capacity test, not proof of worst-case CPU/PPU timing. Use [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) for color/priority/attribute output, applicable CGB [Mooneye](https://github.com/Gekkio/mooneye-test-suite) cases for hardware behavior, and [Mealybug Tearoom](https://github.com/mattcurrie/mealybug-tearoom-tests) for PPU timing, alongside commercial gameplay. These additional suites are planned, not claimed passing.
+- Once the complete core and storage path are ready, test Densha through menus, gameplay, high ROM banks, audio and save/reload behavior. Also cover other mapper/RTC/graphics cases with games such as Pokémon Crystal, Zelda Oracle of Ages/Seasons and Shantae; do not optimize correctness around one title.
+
+
 
 ## Verification status
 | Test | Result |
 |---|---|
 | Blargg cpu_instrs 01–11 | all pass |
 | Blargg instr_timing | pass |
-| dmg-acid2 | pixel-exact vs reference |
+| dmg-acid2 | Pixel-exact in simulation and live USB capture: 0 / 23,040 shade mismatches |
 | Earlier BRAM-ROM hardware: dmg-acid2 on HDMI | correct |
 | Earlier BRAM-ROM hardware: 01-special loaded from SPI flash | Passed |
 | Four-phase PSRAM pin-model regression | 15 delay combinations pass |
 | Current full-design PSRAM eight-byte boot test | Pass; larger memory stress still needed |
-| Batman loaded from SPI flash through PSRAM | User confirms game runs |
-| ROM header self-check indicator | Investigation ongoing |
+| Batman loaded from SPI flash through PSRAM | Live FPGA pixels captured over USB without HDMI |
+| ROM header self-check indicator | CE ED readback and logo_ok=1 on the connected board |
+| Synthetic DMG/CGB banking ROMs | Simulation pass; both live board captures show the expected shade-1 result |
+| USB scanline capture | Capture/TX/RX regression passes; live readback, invalid-line reply and LCD-off failure verified |
+| Tetris USB joypad input | Sending Start changes the live title screen to the game-type menu |
 
 ## Not yet implemented
 - APU (sound)
-- GBC CPU speed switching, color PPU, VRAM/WRAM banking and HDMA
+- GBC CPU post-boot state and speed switching, color PPU, and HDMA
 - Boot ROM: the core starts at 0x0100 with post-boot register values
 - Persistent cartridge-RAM saves and MBC3 RTC

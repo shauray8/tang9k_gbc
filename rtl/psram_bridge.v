@@ -74,7 +74,12 @@ module psram_bridge (
         if (!mrst_n) begin st <= 0; ak_t <= 0; m_ready <= 0; rq_s <= 0; end
         else begin
             if (!c_busy) m_ready <= 1;
-            if (st != 2'd0 && dbg_lat != 8'hFF) dbg_lat <= dbg_lat + 1;
+            // Separate nibble enables keep this diagnostic counter off the 81 MHz critical path
+            // when arithmetic is mapped to LUTs instead of placement-constrained carry chains.
+            if (st != 2'd0 && dbg_lat != 8'hFF) begin
+                dbg_lat[3:0] <= dbg_lat[3:0] + 1'b1;
+                if (&dbg_lat[3:0]) dbg_lat[7:4] <= dbg_lat[7:4] + 1'b1;
+            end
             case (st)
                 2'd0: if (m_ready && rq_s[2] != rq_s[1] && !c_busy) begin
                           c_rd <= !we_h; c_wr <= we_h; st <= 2'd1; dbg_lat <= 0;

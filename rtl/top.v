@@ -121,36 +121,44 @@ module top (
     end
 
     // ---------------- USB-UART (BL702, 115200 8N1) ----------------
-    // 'J' <buttons>; 'L' <whole .gb image> -> 'K' <8-bit sum> (length taken from header 0x148)
+    // 'J' <buttons>; 'L' <whole .gb image> -> 'K' <8-bit sum> (length taken from header 0x148);
+    // 'V' <line> -> one captured LCD line (rtl/line_capture.v). S/D/H/V are ignored while a line
+    // capture is in progress so replies never interleave.
     wire u_v; wire [7:0] u_d;
     uart_rx #(.DIV(219)) urx (.clk(pclk), .rx(uart_rx), .valid(u_v), .data(u_d));
-    localparam S_CMD = 2'd0, S_JOY = 2'd1, S_ROM = 2'd2;
+    localparam S_CMD = 2'd0, S_JOY = 2'd1, S_ROM = 2'd2, S_LINE = 2'd3;
     reg [1:0] us;
     reg [7:0] ubtn;
     reg [21:0] idle;
     // TX queue: 'L' done -> 'K' <sum>; 'S' -> 'S' <flags> <load addr[21:14]> <PC[15:8]>
     //   flags = {psram_ready, load_done, flash_busy, lcd_on, video_locked, waitlock, cart_type[1:0]}
     reg [3:0] tq;                 // bytes left to send
-    reg [1:0] tq_s;               // 0 = load ack, 1 = status, 2 = memory diagnostic
+    reg [1:0] tq_s;               // 0 = load ack, 1 = status, 2 = memory diagnostic, 3 = header
+    wire tx_rdy, cap_busy, cap_we; wire [7:0] cap_d;
+    wire cap_req = u_v && us == S_LINE;
     wire [15:0] pc;
     wire lcd_on;
     wire ld_m_req; wire [21:0] ld_m_addr; wire [7:0] ld_m_wd;
     wire u_start = u_v && us == S_CMD && u_d == "L";
     wire [1:0] cart_type; wire [8:0] rom_mask; wire [3:0] ram_mask; wire [7:0] lsum;
+    wire cgb_mode;
     always @(posedge pclk) begin
         if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0; end
         else begin
-            if (tq != 0) tq <= tq - 1;
+            if (tq != 0 && tx_rdy) tq <= tq - 1;
             idle <= u_v ? 22'd0 : (idle[21] ? idle : idle + 1);
-            if (idle[21] && us != S_CMD) us <= S_CMD;          // ~80 ms gap aborts 'J'/'L'
+            if (idle[21] && us != S_CMD) us <= S_CMD;          // ~80 ms gap aborts 'J'/'L'/'V'
             if (us == S_ROM && ld_done) begin us <= S_CMD; tq <= 2; tq_s <= 0; end
             if (u_v) case (us)
                 S_CMD: if (u_d == "J") us <= S_JOY;
                        else if (u_d == "L") us <= S_ROM;
+                       else if (cap_busy) ;
                        else if (u_d == "S") begin tq <= 4; tq_s <= 1; end
                        else if (u_d == "D") begin tq <= 9; tq_s <= 2; end
                        else if (u_d == "H") begin tq <= 3; tq_s <= 3; end
+                       else if (u_d == "V") us <= S_LINE;
                 S_JOY: begin ubtn <= u_d; us <= S_CMD; end
+                S_LINE: us <= S_CMD;
                 default: ;
             endcase
         end
@@ -176,14 +184,15 @@ module top (
         6'b11_0001: tx_d = rb1;
         default:  tx_d = pc[15:8];
     endcase
-    uart_tx #(.DIV(219)) utx (.clk(pclk), .rst(rst), .tx(uart_tx), .we(tq != 0), .wd(tx_d));
+    uart_tx #(.DIV(219)) utx (.clk(pclk), .rst(rst), .tx(uart_tx), .ready(tx_rdy),
+                              .we(tq != 0 || cap_we), .wd(tq != 0 ? tx_d : cap_d));
 
     cart_loader loader (
         .clk(pclk), .start(fl_start || u_start),
         .in_v(us == S_ROM ? u_v : fl_v), .in_d(us == S_ROM ? u_d : fl_d),
         .full(ld_full), .done(ld_done),
         .m_req(ld_m_req), .m_addr(ld_m_addr), .m_wd(ld_m_wd), .m_busy(b_busy),
-        .cart_type(cart_type), .rom_mask(rom_mask), .ram_mask(ram_mask), .sum(lsum)
+        .cgb_mode(cgb_mode), .cart_type(cart_type), .rom_mask(rom_mask), .ram_mask(ram_mask), .sum(lsum)
     );
 
     // Post-load self-check: read back header bytes 0x104/0x105 (0xCE 0xED in every valid ROM)
@@ -209,6 +218,7 @@ module top (
     wire g_req, g_we; wire [21:0] g_addr; wire [7:0] g_wd;
     gb core (
         .clk(pclk), .rst(gb_rst), .clk_en(tick), .buttons(joy | ubtn | {btn_sync[14], 7'b0}),
+        .cgb_mode(cgb_mode),
         .pix_we(pix_we), .pix(pix), .pix_x(px), .pix_y(py), .vsync(gb_vsync), .lcd_on(lcd_on),
         .cart_type(cart_type), .rom_mask(rom_mask), .ram_mask(ram_mask),
         .ext_addr(g_addr), .ext_req(g_req), .ext_we(g_we), .ext_wd(g_wd), .ext_rd(b_rd),
@@ -219,6 +229,13 @@ module top (
     assign b_we   = !test_done ? test_we : !ld_done ? 1'b1 : v_issue ? 1'b0 : g_we;
     assign b_addr = !test_done ? test_addr : !ld_done ? ld_m_addr : vst == 3'd1 ? 22'h104 : vst == 3'd3 ? 22'h105 : g_addr;
     assign b_wd   = !test_done ? test_wd : !ld_done ? ld_m_wd : g_wd;
+
+    // ---------------- headless video readback ('V' <line>, see rtl/line_capture.v) ----------------
+    line_capture lcap (
+        .clk(pclk), .rst(rst), .req(cap_req), .line(u_d), .running(!gb_rst), .lcd_on(lcd_on),
+        .pix_we(pix_we), .pix(pix), .pix_x(px), .pix_y(py),
+        .tx_ready(tx_rdy && tq == 0), .tx_we(cap_we), .tx_d(cap_d), .busy(cap_busy)
+    );
 
     // ---------------- 32-line ring buffer ----------------
     reg [1:0] ring [0:8191];

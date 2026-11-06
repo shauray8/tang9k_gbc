@@ -1,5 +1,6 @@
 // DMG PPU. One dot per ce_t. ce marks M-cycle boundaries (subset of clk, coincident with a CPU bus edge).
-// VRAM: single BSRAM port shared with the CPU (CPU locked out in mode 3, as on hardware).
+// VRAM: 2 x 8 KiB on a single BSRAM port shared with the CPU (CPU locked out in mode 3, as on hardware).
+// The CPU reaches the bank chosen by VBK (FF4F, CGB mode only); the monochrome renderer reads bank 0.
 // OAM: 4 x 64x8 distributed RAM banks -> one whole sprite entry per dot during OAM scan.
 // Sprites are fetched during mode 2 (VRAM otherwise idle) and merged with a per-sprite
 // stall in mode 3 (single merge unit).
@@ -8,6 +9,7 @@ module ppu (
     input             rst,
     input             ce_t,
     input             ce,
+    input             cgb_mode,
     input      [15:0] cpu_addr,
     input             cpu_wr,      // already qualified with ce
     input      [7:0]  cpu_din,
@@ -31,6 +33,7 @@ module ppu (
     // ---------------- registers ----------------
     reg [7:0] LCDC, SCY, SCX, LYC, BGP, OBP0, OBP1, WY, WX;
     reg [3:0] STATW;              // STAT bits 6..3
+    reg vbk;                      // FF4F VRAM bank (CGB mode only)
     reg [7:0] ly;
     reg [8:0] dot;
     reg [1:0] mode;
@@ -41,8 +44,8 @@ module ppu (
     wire cpu_oam_ok  = !mode[1] && !dma_act;
 
     // ---------------- VRAM ----------------
-    reg [7:0] vram [0:8191];
-    reg [12:0] v_addr;
+    reg [7:0] vram [0:16383];
+    reg [13:0] v_addr;
     reg v_we;
     reg [7:0] v_q;
     always @(posedge clk) begin
@@ -59,7 +62,7 @@ module ppu (
     wire ppu_gnt = ce_t && ppu_vreq && !cpu_owns;
     always @(*) begin
         v_we = cpu_vwr;
-        v_addr = cpu_owns ? cpu_addr[12:0] : ppu_va;
+        v_addr = cpu_owns ? {vbk & cgb_mode, cpu_addr[12:0]} : {1'b0, ppu_va};
     end
     reg ppu_iss;                  // previous clk was a granted PPU issue
     reg [7:0] ppu_vhold;
@@ -108,6 +111,7 @@ module ppu (
             4'h9: cpu_dout = OBP1;
             4'hA: cpu_dout = WY;
             4'hB: cpu_dout = WX;
+            4'hF: cpu_dout = cgb_mode ? {7'h7F, vbk} : 8'hFF;
             default: cpu_dout = 8'hFF;
         endcase
     end
@@ -179,7 +183,7 @@ module ppu (
     always @(posedge clk) begin
         irq_vblank <= 0; irq_stat <= 0; pix_we <= 0; vsync <= 0;
         if (rst) begin
-            LCDC <= 8'h91; STATW <= 0; SCY <= 0; SCX <= 0; LYC <= 0;
+            LCDC <= 8'h91; STATW <= 0; SCY <= 0; SCX <= 0; LYC <= 0; vbk <= 0;
             BGP <= 8'hFC; OBP0 <= 8'hFF; OBP1 <= 8'hFF; WY <= 0; WX <= 0;
             ly <= 0; dot <= 0; mode <= 2'd2; stat_prev <= 0;
             s_cnt <= 0; s_fp <= 0; s_fhi <= 0; s_pend <= 0;
@@ -197,6 +201,7 @@ module ppu (
                 4'h9: OBP1 <= cpu_din;
                 4'hA: WY <= cpu_din;
                 4'hB: WX <= cpu_din;
+                4'hF: if (cgb_mode) vbk <= cpu_din[0];
                 default: ;
             endcase
 

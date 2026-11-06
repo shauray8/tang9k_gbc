@@ -1,4 +1,4 @@
-// DMG system: CPU + memory map + timer + serial + joypad + PPU.
+// DMG system: CPU + memory map + timer + serial + joypad + PPU, plus CGB banked WRAM/VRAM (cgb_mode).
 // clk runs at 4x the M-cycle rate; one T-cycle per clk (ce_t), one M-cycle per 4 clk (ce).
 module gb (
     input             clk,
@@ -16,6 +16,7 @@ module gb (
     input      [1:0]  cart_type,
     input      [8:0]  rom_mask,         // ROM bank mask (banks - 1)
     input      [3:0]  ram_mask,         // RAM bank mask
+    input             cgb_mode,         // CGB-mode cartridge (header 0x143 bit 7): enables SVBK/VBK
     // external cartridge memory (PSRAM via bridge)
     output     [21:0] ext_addr,
     output            ext_req,          // 1-clk pulse at M-cycle start
@@ -101,12 +102,21 @@ module gb (
     assign ext_we = cpu_wr && !dma_act && cram_sel;
     assign ext_wd = cpu_dout;
 
-    reg [7:0] wram [0:8191];
+    // WRAM: 8 x 4 KiB. C000-CFFF is bank 0; D000-DFFF is SVBK bank 1..7 (0 selects 1). E000-FDFF echoes
+    // C000-DDFF with the same banking. DMG mode keeps SVBK at its reset state: the plain 8 KiB map.
+    // Single port: CPU writes are blocked while DMA owns the bus, so the one address is always ma.
+    reg [2:0] svbk;               // stored as written (reads back 0 after writing 0)
+    always @(posedge clk)
+        if (rst) svbk <= 0;
+        else if (wr_now && a == 16'hFF70 && cgb_mode) svbk <= cpu_dout[2:0];
+    wire [2:0] wbank = !ma[12] ? 3'd0 : (cgb_mode && svbk != 0) ? svbk : 3'd1;
+    wire [14:0] wram_a = {wbank, ma[11:0]};
+    reg [7:0] wram [0:32767];
     reg [7:0] wram_q;
     wire wram_sel = a[15:13] == 3'b110 || (a[15:13] == 3'b111 && a < 16'hFE00); // C000-FDFF (echo)
     always @(posedge clk) begin
-        if (wr_now && wram_sel && !dma_act) wram[a[12:0]] <= cpu_dout;
-        wram_q <= wram[ma[12:0]];
+        if (wr_now && wram_sel && !dma_act) wram[wram_a] <= cpu_dout;
+        wram_q <= wram[wram_a];
     end
 
     reg [7:0] hram [0:127];
@@ -130,12 +140,13 @@ module gb (
     wire [7:0] ppu_q;
     wire vram_sel = a[15:13] == 3'b100;
     wire oam_sel  = a[15:8] == 8'hFE && a[7:0] < 8'hA0;
-    wire preg_sel = a[15:4] == 12'hFF4 && a[3:0] <= 4'hB && a[3:0] != 4'h6;
+    wire preg_sel = a[15:4] == 12'hFF4 && (a[3:0] <= 4'hB && a[3:0] != 4'h6 || a[3:0] == 4'hF); // + FF4F VBK
     wire ppu_vblank, ppu_stat;
-    wire [7:0] dma_data = (dma_src[15:14] == 2'b11) ? wram_q : ext_rd; // ROM/cart RAM/WRAM (VRAM source unsupported)
+    // ROM/cart RAM/WRAM (VRAM source unsupported); WRAM sources follow SVBK and the echo map via ma
+    wire [7:0] dma_data = (dma_src[15:14] == 2'b11) ? wram_q : ext_rd;
 
     ppu ppu (
-        .clk(clk), .rst(rst), .ce_t(clk_en), .ce(ce),
+        .clk(clk), .rst(rst), .ce_t(clk_en), .ce(ce), .cgb_mode(cgb_mode),
         .cpu_addr(a), .cpu_wr(wr_now && !(dma_act && oam_sel)), .cpu_din(cpu_dout), .cpu_dout(ppu_q),
         .vram_sel(vram_sel), .oam_sel(oam_sel), .reg_sel(preg_sel),
         .dma_act(dma_act), .dma_we(dma_act && ce), .dma_idx(dma_idx), .dma_data(dma_data),
@@ -210,6 +221,7 @@ module gb (
         else if (a == 16'hFF01)  cpu_din = sb;
         else if (a == 16'hFF02)  cpu_din = {sc[7], 6'b111111, sc[0]};
         else if (a == 16'hFF46)  cpu_din = dma_hi;
+        else if (a == 16'hFF70)  cpu_din = cgb_mode ? {5'b11111, svbk} : 8'hFF;
         else                     cpu_din = 8'hFF;
     end
 endmodule

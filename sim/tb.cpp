@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
 
     Vgb *g = new Vgb;
     g->cart_type = cart; g->rom_mask = banks - 1; g->ram_mask = rb ? rb - 1 : 0;
+    g->cgb_mode = (ext[0x143] & 0x80) != 0;
     static unsigned char fb[144][160];
     memset(fb, 0, sizeof fb);
     std::string ser;

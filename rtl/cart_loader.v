@@ -13,6 +13,7 @@ module cart_loader (
     output     [7:0]  m_wd,
     input             m_busy,
     // decoded header (valid after done)
+    output reg        cgb_mode,     // ROM header 0x143 bit 7; banking groundwork, not full GBC support
     output reg [1:0]  cart_type,    // 0 none, 1 MBC1, 2 MBC3, 3 MBC5
     output reg [8:0]  rom_mask,
     output reg [3:0]  ram_mask,
@@ -28,11 +29,13 @@ module cart_loader (
     always @(posedge clk) begin
         if (start) begin
             idx <= 0; last <= 22'h3DFFFF; slot_v <= 0; active <= 1; done <= 0; sum <= 0;
+            cgb_mode <= 0;
         end else begin
             if (in_v && active) begin slot <= in_d; slot_v <= 1; end
             if (m_req) begin
                 slot_v <= 0; idx <= idx + 1; sum <= sum + slot;
                 case (idx)
+                    22'h143: cgb_mode <= slot[7];
                     22'h147: cart_type <= (slot >= 8'h01 && slot <= 8'h03) ? 2'd1 :
                                          (slot >= 8'h0F && slot <= 8'h13) ? 2'd2 :
                                          (slot >= 8'h19 && slot <= 8'h1E) ? 2'd3 : 2'd0;

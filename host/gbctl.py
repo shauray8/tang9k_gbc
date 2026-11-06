@@ -10,6 +10,9 @@ talks to the bridge's UART endpoints directly over libusb (bundled with the tool
   gbctl.py diagnose        print boot-memory address, expected/actual bytes, and controller state
   gbctl.py play            open a window; keyboard = joypad (window must have focus)
                            arrows = D-pad, Z = A, X = B, Enter = Start, Backspace/Shift = Select
+  gbctl.py screenshot out.ppm
+                           read the live LCD back over the UART (no HDMI needed) into a 160x144
+                           PPM; one line per frame, so the image is rolling (~3-6 s), not atomic
 """
 import ctypes, os, sys, time
 
@@ -22,6 +25,9 @@ BTN = {"right": 0, "left": 1, "up": 2, "down": 3, "a": 4, "b": 5, "select": 6, "
 KEYS = {"Right": "right", "Left": "left", "Up": "up", "Down": "down", "z": "a", "Z": "a",
         "x": "b", "X": "b", "Return": "start", "BackSpace": "select", "Shift_L": "select",
         "Shift_R": "select"}
+SHADES = (b"\xe0\xf8\xd0", b"\x88\xc0\x70", b"\x34\x68\x56", b"\x08\x18\x20")   # rtl/top.v DMG shades
+CAP_ERR = {1: "core held in reset (no game loaded, or still loading)", 2: "LCD is off",
+           3: "line not drawn within ~83 ms (core stalled?)", 4: "line out of range"}
 
 
 class Link:
@@ -33,6 +39,7 @@ class Link:
         L.libusb_claim_interface.argtypes = [V, I]
         L.libusb_release_interface.argtypes = [V, I]
         L.libusb_close.argtypes = [V]
+        L.libusb_exit.argtypes = [V]
         L.libusb_control_transfer.argtypes = [V, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint16,
                                               ctypes.c_uint16, V, ctypes.c_uint16, ctypes.c_uint]
         L.libusb_bulk_transfer.argtypes = [V, ctypes.c_ubyte, V, I, ctypes.POINTER(I), ctypes.c_uint]
@@ -41,9 +48,12 @@ class Link:
         L.libusb_init(ctypes.byref(self.ctx))
         self.h = L.libusb_open_device_with_vid_pid(self.ctx, VID, PID)
         if not self.h:
+            L.libusb_exit(self.ctx)
             sys.exit("Tang Nano 9K not found on USB (check cable / re-plug)")
         r = L.libusb_claim_interface(self.h, IFACE)
         if r:
+            L.libusb_close(self.h)
+            L.libusb_exit(self.ctx)
             sys.exit(f"cannot claim UART interface: {L.libusb_error_name(r).decode()}")
         # Initialize the UART explicitly after USB reconnect: 115200 baud,
         # 8N1, no flow control. These are FTDI vendor requests, not termios.
@@ -65,19 +75,22 @@ class Link:
             if r:
                 sys.exit(f"USB write failed: {self.L.libusb_error_name(r).decode()}")
 
-    def read(self, seconds):
+    def read(self, seconds, done=None):
+        """Collect UART bytes for `seconds`, or until done(bytes_so_far) is true. Replies may span
+        several USB transfers; each 64-byte packet starts with 2 status bytes."""
         out, n, buf = b"", ctypes.c_int(), ctypes.create_string_buffer(512)
         end = time.time() + seconds
-        while time.time() < end:
+        while time.time() < end and not (done and done(out)):
             self.L.libusb_bulk_transfer(self.h, EP_IN, buf, 512, ctypes.byref(n), 50)
             d = buf.raw[:n.value]
-            for i in range(0, len(d), 64):        # each 64-byte packet starts with 2 status bytes
+            for i in range(0, len(d), 64):
                 out += d[i + 2:i + 64]
         return out
 
     def close(self):
         self.L.libusb_release_interface(self.h, IFACE)
         self.L.libusb_close(self.h)
+        self.L.libusb_exit(self.ctx)
 
 
 def load(link, path):
@@ -182,8 +195,34 @@ def diagnose(link):
             print(f"ROM header readback: 0x104={a:02x} 0x105={b:02x} (expected ce ed)")
 
 
+def capture_line(link, y):
+    """'V' <y> -> 'V' <y> <40 bytes, 4 px/byte, MSB first> <sum8>, or 'v' <error code>."""
+    r = b""
+    for _ in range(3):
+        link.write(bytes([ord("V"), y]))
+        r = link.read(0.5, lambda b: len(b) >= 43 or (b[:1] == b"v" and len(b) >= 2))
+        if r[:1] == b"v" and len(r) == 2:
+            sys.exit(f"screenshot failed at line {y}: {CAP_ERR.get(r[1], f'error code {r[1]}')}")
+        if len(r) == 43 and r[0] == ord("V") and r[1] == y and sum(r[2:42]) & 0xFF == r[42]:
+            return r[2:42]
+        link.read(0.1)                    # discard the rest of a garbled reply before retrying
+    sys.exit(f"screenshot failed at line {y}: no valid reply after 3 attempts (last {r!r}); "
+             "is the current design flashed?")
+
+
+def screenshot(link, path):
+    t = time.time()
+    link.read(0.05)                       # drop stale bytes so replies start frame-aligned
+    rows = [b"".join(SHADES[(b >> s) & 3] for b in capture_line(link, y) for s in (6, 4, 2, 0))
+            for y in range(144)]
+    with open(path, "wb") as f:
+        f.write(b"P6\n160 144\n255\n" + b"".join(rows))
+    print(f"wrote {path}: 160x144 in {time.time() - t:.1f}s "
+          "(rolling capture: each line from a later frame than the one above)")
+
+
 if __name__ == "__main__":
-    cmds = {"load": 3, "play": 2, "status": 2, "diagnose": 2}
+    cmds = {"load": 3, "play": 2, "status": 2, "diagnose": 2, "screenshot": 3}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds or len(sys.argv) < cmds[sys.argv[1]]:
         sys.exit(__doc__)
     link = Link()
@@ -194,6 +233,8 @@ if __name__ == "__main__":
             play(link)
         elif sys.argv[1] == "diagnose":
             diagnose(link)
+        elif sys.argv[1] == "screenshot":
+            screenshot(link, sys.argv[2])
         else:
             status(link)
     finally:

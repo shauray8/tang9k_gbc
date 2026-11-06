@@ -1,9 +1,11 @@
-// 8N1 UART transmitter with a 16-byte FIFO. DIV = clk / baud.
+// 8N1 UART transmitter with a 16-entry FIFO (15 usable). DIV = clk / baud.
+// ready = FIFO has room: a write with we && ready is accepted; writes while !ready are dropped.
 module uart_tx #(parameter DIV = 219) (
     input            clk,
     input            rst,
     input            we,
     input      [7:0] wd,
+    output           ready,
     output reg       tx
 );
     reg [7:0] fifo [0:15];
@@ -11,10 +13,11 @@ module uart_tx #(parameter DIV = 219) (
     reg [9:0] sh;
     reg [3:0] n;
     reg [8:0] cnt;
+    assign ready = wp + 4'd1 != rp;
     always @(posedge clk) begin
         if (rst) begin wp <= 0; rp <= 0; n <= 0; tx <= 1; cnt <= 0; end
         else begin
-            if (we && wp + 4'd1 != rp) begin fifo[wp] <= wd; wp <= wp + 1; end
+            if (we && ready) begin fifo[wp] <= wd; wp <= wp + 1; end
             if (cnt != 0) cnt <= cnt - 1;
             else if (n != 0) begin
                 tx <= sh[0]; sh <= sh >> 1; n <= n - 1; cnt <= DIV - 1;
