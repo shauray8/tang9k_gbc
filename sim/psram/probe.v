@@ -1,17 +1,17 @@
 // Volatile memory diagnostic. No CPU/video; the flashed game image is unchanged.
 // FAST: 81 MHz memory fabric instead of 27 MHz. BRIDGE: actual 27-to-81 MHz bridge.
 // UART remains at clk27. 'R' physically resets/retests memory; 'D' reports stable test results.
-module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0) (
+module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0, MEM_MHZ = 81, STRESS = 0) (
     input clk27, uart_rx,
     output uart_tx,
     output [1:0] O_psram_ck, O_psram_ck_n, O_psram_cs_n, O_psram_reset_n,
     inout [15:0] IO_psram_dq,
     inout [1:0] IO_psram_rwds
 );
-    localparam FREQ = (FAST || BRIDGE) ? 81_000_000 : 27_000_000;
+    localparam FREQ = (FAST || BRIDGE) ? MEM_MHZ * 1_000_000 : 27_000_000;
     wire mclk, mlock, tclk, tlock, sys27;
     generate if (FAST || BRIDGE) begin: fast_clock
-        pll_psram pll (.clock_in(clk27), .clock_out(mclk), .clock_sys(sys27), .locked(mlock));
+        pll_psram #(.FREQ(FREQ)) pll (.clock_in(clk27), .clock_out(mclk), .clock_sys(sys27), .locked(mlock));
     end else begin: direct_clock
         assign mclk = clk27; assign mlock = 1'b1; assign sys27 = clk27;
     end endgenerate
@@ -34,7 +34,7 @@ module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0) (
     wire [15:0] debug_word;
     wire client_clk = SYNC ? mclk : tclk;
     generate if (BRIDGE) begin: with_bridge
-        psram_bridge pb (
+        psram_bridge #(.FREQ(FREQ)) pb (
             .clk(client_clk), .rst(rst), .req(req), .we(we), .addr(addr), .wd(wd), .rd(rd),
             .busy(busy), .ready(ready), .hang(hang), .dbg_lat(cycles), .dbg_word(debug_word), .dbg_state(state),
             .mclk(mclk), .mrst_n(!rst), .O_psram_ck(O_psram_ck), .O_psram_ck_n(O_psram_ck_n),
@@ -61,11 +61,19 @@ module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0) (
             .O_psram_cs_n(O_psram_cs_n), .IO_psram_dq(IO_psram_dq), .IO_psram_rwds(IO_psram_rwds)
         );
     end endgenerate
-    psram_test mt (
-        .clk(client_clk), .rst(rst), .ready(ready), .busy(busy), .rd(rd),
-        .req(req), .we(we), .addr(addr), .wd(wd), .done(done), .passed(passed),
-        .fail_addr(fail_addr), .expected(expected), .actual(actual)
-    );
+    generate if (STRESS) begin: stress_test
+        psram_stress mt (
+            .clk(client_clk), .rst(rst), .ready(ready), .busy(busy), .rd(rd),
+            .req(req), .we(we), .addr(addr), .wd(wd), .done(done), .passed(passed),
+            .fail_addr(fail_addr), .expected(expected), .actual(actual)
+        );
+    end else begin: boot_test
+        psram_test mt (
+            .clk(client_clk), .rst(rst), .ready(ready), .busy(busy), .rd(rd),
+            .req(req), .we(we), .addr(addr), .wd(wd), .done(done), .passed(passed),
+            .fail_addr(fail_addr), .expected(expected), .actual(actual)
+        );
+    end endgenerate
     // Clock measurement against the 27 MHz crystal: count /128 toggle edges
     // over 32768 input cycles. Frequency in MHz = edge_count * 27 / 256.
     reg [7:0] mdiv = 0, tdiv = 0;

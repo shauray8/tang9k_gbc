@@ -53,19 +53,22 @@ clean:
 PROBE_FAST ?= 0
 PROBE_BRIDGE ?= 0
 PROBE_SYNC ?= 0
-PROBE_BUILD := build/psram_probe$(if $(filter 1,$(PROBE_BRIDGE)),bridge$(if $(filter 1,$(PROBE_SYNC)),sync,),$(if $(filter 1,$(PROBE_FAST)),81,))
-PROBE_RTL := sim/psram/probe.v rtl/psram_controller.v rtl/psram_bridge.v rtl/psram_test.v rtl/uart_rx.v rtl/uart_tx.v rtl/pll_psram.v
+PROBE_MEM_MHZ ?= 81
+PROBE_STRESS ?= 0
+PROBE_BUILD := build/psram_probe$(if $(filter 1,$(PROBE_BRIDGE)),bridge$(if $(filter 1,$(PROBE_SYNC)),sync,),$(if $(filter 1,$(PROBE_FAST)),81,))$(if $(filter 162,$(PROBE_MEM_MHZ)),_162,)$(if $(filter 1,$(PROBE_STRESS)),_stress,)
+PROBE_RTL := sim/psram/probe.v sim/psram/stress.v rtl/psram_controller.v rtl/psram_bridge.v rtl/psram_test.v rtl/uart_rx.v rtl/uart_tx.v rtl/pll_psram.v
 PROBE_CST := boards/tangnano9k/psram_probe.cst
-# Constrain every probe clock conservatively to the fastest selected domain.
-PROBE_MHZ := $(if $(filter 1,$(PROBE_FAST) $(PROBE_BRIDGE)),81,27)
+# The 162 MHz probe constrains only the memory domain that fast; USB stays at 27 MHz.
+PROBE_SDC := $(if $(and $(filter 162,$(PROBE_MEM_MHZ)),$(filter 1,$(PROBE_FAST) $(PROBE_BRIDGE))),boards/tangnano9k/psram_probe162.sdc,)
+PROBE_MHZ := $(if $(PROBE_SDC),27,$(if $(filter 1,$(PROBE_FAST) $(PROBE_BRIDGE)),81,27))
 
-$(PROBE_BUILD)/probe.json: $(PROBE_RTL)
+$(PROBE_BUILD)/probe.json: $(PROBE_RTL) Makefile
 	@mkdir -p $(PROBE_BUILD)
-	yosys -q -l $(PROBE_BUILD)/yosys.log -p "read_verilog $(PROBE_RTL); chparam -set FAST $(PROBE_FAST) -set BRIDGE $(PROBE_BRIDGE) -set SYNC $(PROBE_SYNC) psram_probe; synth_gowin -top psram_probe -json $@"
+	yosys -q -l $(PROBE_BUILD)/yosys.log -p "read_verilog $(PROBE_RTL); chparam -set FAST $(PROBE_FAST) -set BRIDGE $(PROBE_BRIDGE) -set SYNC $(PROBE_SYNC) -set MEM_MHZ $(PROBE_MEM_MHZ) -set STRESS $(PROBE_STRESS) psram_probe; synth_gowin -nowidelut -top psram_probe -json $@"
 
-$(PROBE_BUILD)/pnr.json: $(PROBE_BUILD)/probe.json $(PROBE_CST)
+$(PROBE_BUILD)/pnr.json: $(PROBE_BUILD)/probe.json $(PROBE_CST) $(PROBE_SDC)
 	nextpnr-himbaechel -l $(PROBE_BUILD)/pnr.log --json $< --write $@ --device $(DEVICE) \
-	  --vopt family=$(FAMILY) --vopt cst=$(PROBE_CST) --freq $(PROBE_MHZ)
+	  --vopt family=$(FAMILY) --vopt cst=$(PROBE_CST) $(if $(PROBE_SDC),--sdc $(PROBE_SDC),) --freq $(PROBE_MHZ)
 
 $(PROBE_BUILD)/probe.fs: $(PROBE_BUILD)/pnr.json
 	gowin_pack -d $(FAMILY) -o $@ $<

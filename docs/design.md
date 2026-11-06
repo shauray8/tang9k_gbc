@@ -6,6 +6,8 @@
 - Game Boy Color: 32 KiB banked WRAM, 16 KiB banked VRAM, CGB CPU startup registers and RGB555 rendering are implemented. KEY1/double-speed, HDMA and complete CGB bus/timing behavior remain unimplemented.
 - File-backed ROM banking supports MBC1/3/5. There is no physical cartridge interface. Audio, persistent saves, MBC3 RTC and broad mapper compatibility remain incomplete.
 
+**Checkpoint status:** `b183f65` is the last hardware-verified, flashed full-color build. The later memory work is an experimental checkpoint: the main design's memory fabric remains 81 MHz, but controller/bridge RTL has changed and has not been revalidated in the full FPGA design. Use `b183f65` for the known-good hardware build. No experimental memory probe was programmed onto the board.
+
 ## Reproducing the build
 
 The tested toolchain is [OSS CAD Suite 2026-11-04](https://github.com/YosysHQ/oss-cad-suite-build/releases/tag/2026-11-04), Darwin ARM64 on the development Mac. Extract it to `tools/oss-cad-suite`, or export `OSS_CAD_SUITE=/path/to/oss-cad-suite`. Run the suite's `activate` script once on macOS. Then, from this repository in Bash:
@@ -131,6 +133,36 @@ LUT4-only mapping avoids the expensive wide-mux mapping of this design. Moving s
 These are single-route results, not a multi-seed optimum. There are 1,505 LUTs left, but timing and memory-bandwidth limits still matter. The 371.25 MHz clock drives hard serializers; the reported fabric Fmax values do not constitute an electrical HDMI validation.
 
 Capture remains isolated in `rtl/line_capture.v` and taps the PPU passively. Removing it and its UART commands can reclaim one BSRAM plus logic if later GBC features need the space; no removal delta has been measured.
+
+## Double-speed memory experiment (paused)
+
+The 81 MHz baseline cannot meet the double-speed CPU deadline: the first observed complete transaction took 703.722 ns against a 370.370 ns data-setup budget. Merely adding KEY1 would therefore be unsafe.
+
+The candidate keeps four-phase registered I/O, but targets 162 MHz fabric / 40.5 MHz memory CK. The PLL still uses a 648 MHz VCO; CLKOUTD/6 supplies the unchanged 27 MHz system clock. This frequency is not enabled in the main top level.
+
+Changes in the checkpoint:
+- Controller command preparation, CA shift/enable, transmit-cycle and receive-window predecode shorten control paths. A PREPARE cycle registers command launch before physical transfer.
+- Registered response-valid allows the bridge to return a captured word before physical bus recovery finishes. Pending request toggles are retained until the controller is available, rather than discarded during recovery.
+- Read data is sampled continuously into the bridge output and again into the existing CPU input register. The CPU still uses a fixed cycle schedule; no fabricated fallback or memory wait-state workaround was added.
+- Timeout decode is registered one count early, the cycle counter scales with fabric frequency, and recovery preserves at least the modeled 36 ns requirement. Diagnostic-counter carry/saturation use registered lookahead.
+- The probe-only stress client writes 512 bytes across 256 LFSR word addresses before reading them all back. Reset changes its data pattern so stale contents from a preceding run cannot pass.
+
+The fast consumer regression issues 128 mixed reads/writes at twelve system clocks per request. It checks data before the CPU input register samples at clock ten, the byte consumed at clock eleven, and availability for the next request at clock twelve. Complete acknowledgement latency can reach 407.418 ns; it is separate from the earlier data-setup deadline. The normal-speed complete-acknowledgement assertion remains in place.
+
+The 15 pin-delay combinations passed the fast consumer/stress checks in simulation. Missing-strobe injection also checks that CS/CK are released before the device limit, no read acknowledgement is fabricated, and the bridge retains its timeout fault.
+
+**Hardware gate remains blocked:** the latest isolated stress probe uses 646 LUTs / 507 FFs, but post-route Fmax is **142.82 MHz**, below the required 162 MHz. The latest critical path runs from the bridge read-command register through receive-datapath enable logic to `dout.CE` (7.00 ns). This is not a hardware-proven double-speed memory path. No full-core route, physical fast-memory stress, KEY1 or HDMA implementation has been claimed for this checkpoint.
+
+Reproduce the checks:
+
+```bash
+bash sim/psram/run.sh sweep
+MEM_FREQ=162000000 STRESS=1 bash sim/psram/run.sh sweep
+make psram-probe PROBE_BRIDGE=1 PROBE_MEM_MHZ=162 PROBE_STRESS=1
+```
+
+The last command currently fails timing intentionally rather than producing an accepted bitstream. Resume by closing that measured path, then run physical stress with SRAM-only programming and restore the verified color image before integrating any clock change.
+
 
 ## GBC accuracy targets
 

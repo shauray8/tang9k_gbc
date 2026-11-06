@@ -5,9 +5,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 source "$PWD/env.sh"
 mkdir -p build/sim_psram
-out=build/sim_psram/tb.vvp
-iverilog -g2012 -Wall -Wno-timescale -s tb -o "$out" \
-    rtl/psram_controller.v rtl/psram_bridge.v rtl/psram_test.v \
+freq=${MEM_FREQ:-81000000}
+stress=${STRESS:-0}
+out=build/sim_psram/tb-$freq-$stress.vvp
+iverilog -g2012 -Wall -Wno-timescale -s tb -Ptb.MEM_FREQ="$freq" -Ptb.STRESS="$stress" -o "$out" \
+    rtl/psram_controller.v rtl/psram_bridge.v rtl/psram_test.v sim/psram/stress.v \
     sim/psram/hyperram_model.v sim/psram/tb_psram.v
 if [[ ${1:-} == sweep ]]; then
     shift
