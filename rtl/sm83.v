@@ -16,6 +16,7 @@ module sm83 (
     input      [7:0]  din,
     input      [4:0]  irq,     // request pulses: 0 vblank,1 stat,2 timer,3 serial,4 joypad
     output            halted,
+    output reg        stop_req, // one clk pulse after executing two-byte STOP
     output     [15:0] pc_dbg
 );
     reg [7:0] A, F, B, C, D, E, H, L, IR, Z, W;
@@ -139,6 +140,7 @@ module sm83 (
     task imm;     begin rdm(PC); PC = PC + 1; end endtask
 
     always @(posedge clk) begin
+        stop_req <= 0;
         if (rst) begin
             A = cgb_mode ? 8'h11 : 8'h01; F = cgb_mode ? 8'h80 : 8'hB0;
             B = 0; C = cgb_mode ? 8'h00 : 8'h13;
@@ -196,7 +198,8 @@ module sm83 (
                     cr = cbx(cbop, mc == 3'd1 ? getr(cbop[2:0]) : d, F);
                     casez (op)
                     // ---------------- 0x00-0x3F ----------------
-                    8'h00, 8'h10: begin if (op == 8'h10) PC = PC + 1; fetch; end
+                    8'h00: fetch;
+                    8'h10: begin PC = PC + 1; stop_req <= 1; fetch; end
                     8'b00??0001: case (mc) // LD rr,nn
                         0: imm;
                         1: begin Z = d; imm; end

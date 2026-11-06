@@ -190,7 +190,7 @@ def diagnose(link):
     print("  ".join(f"{name}={(flags >> (7 - i)) & 1}" for i, name in enumerate(names)))
     names = ("timeout", "active", "writing", "configuring", "first_byte", "read_complete", "dq_drive", "rwds_drive")
     print("  ".join(f"{name}={(state >> (7 - i)) & 1}" for i, name in enumerate(names)))
-    print(f"address={(ah << 16) | (am << 8) | al:#08x}  memory_fabric_cycles={cycles}")
+    print(f"address={(ah << 16) | (am << 8) | al:#08x}  system_roundtrip_cycles={cycles}")
     if flags & 0x80 and not flags & 0x40:
         print(f"memory mismatch: expected={expected:02x} actual={actual:02x}")
     elif flags & 0x40:

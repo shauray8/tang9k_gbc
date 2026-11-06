@@ -1,9 +1,10 @@
-// DMG system: CPU + memory map + timer + serial + joypad + PPU, plus CGB banked WRAM/VRAM (cgb_mode).
-// clk runs at 4x the M-cycle rate; one T-cycle per clk (ce_t), one M-cycle per 4 clk (ce).
+// DMG/CGB system: CPU, memory map, timer, serial, joypad and PPU.
+// clk_en is the PPU dot rate; clk_en_fast adds the half-dot CPU T-cycle.
 module gb (
     input             clk,
     input             rst,
-    input             clk_en,           // global clock enable (T-cycle rate)
+    input             clk_en,           // PPU dots / normal CPU T-cycles
+    input             clk_en_fast,      // double CPU T-cycles; includes clk_en
     input      [7:0]  buttons,          // active high: {start,select,b,a,down,up,left,right}
     // video out (one pixel per pix_we)
     output            pix_we,
@@ -29,9 +30,20 @@ module gb (
     output reg [7:0]  ser_data,
     output     [15:0] pc_dbg
 );
-    reg [1:0] tdiv;
-    always @(posedge clk) if (rst) tdiv <= 0; else if (clk_en) tdiv <= tdiv + 1;
-    wire ce = clk_en && tdiv == 2'd3;
+    reg [1:0] tdiv, joy_sel;
+    reg double_speed, key_prepare, stopped;
+    reg [11:0] speed_wait;
+    wire stop_req;
+    wire [3:0] stop_joy_in = ~((joy_sel[0] ? 4'h0 : buttons[3:0]) |
+                                (joy_sel[1] ? 4'h0 : buttons[7:4]));
+    wire stop_enter = stop_req && stop_joy_in == 4'hF;
+    wire stop_wake = stopped && stop_joy_in != 4'hF;
+    wire cpu_tick = double_speed ? clk_en_fast : clk_en;
+    wire cpu_mcycle = cpu_tick && tdiv == 2'd3;
+    wire ce = cpu_mcycle && !stopped && speed_wait == 0;
+    always @(posedge clk)
+        if (rst || stop_enter) tdiv <= 0;
+        else if (cpu_tick) tdiv <= tdiv + 1'b1;
 
     wire [15:0] a;
     wire [7:0] cpu_dout;
@@ -41,10 +53,29 @@ module gb (
 
     sm83 cpu (
         .clk(clk), .rst(rst), .ce(ce), .addr(a), .dout(cpu_dout), .wr(cpu_wr), .rd(cpu_rd),
-        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .halted(), .pc_dbg(pc_dbg)
+        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .halted(), .stop_req(stop_req), .pc_dbg(pc_dbg)
     );
 
     wire wr_now = ce && cpu_wr;
+
+    // STOP arms an oscillator pause, not a derived clock. PPU dots continue
+    // during speed switching; normal STOP also stops them until joypad wake.
+    always @(posedge clk) begin
+        if (rst) begin
+            double_speed <= 0; key_prepare <= 0; speed_wait <= 0; stopped <= 0;
+        end else begin
+            if (wr_now && a == 16'hFF4D && cgb_mode) key_prepare <= cpu_dout[0];
+            if (cpu_mcycle && speed_wait != 0) speed_wait <= speed_wait - 1'b1;
+            if (stop_wake) stopped <= 0;
+            if (stop_enter) begin
+                if (cgb_mode && key_prepare) begin
+                    double_speed <= !double_speed;
+                    key_prepare <= 0;
+                    speed_wait <= 12'd2050;
+                end else stopped <= 1;
+            end
+        end
+    end
 
     // ---------------- memories ----------------
     // OAM DMA (FF46): 160 M-cycles. Like hardware, DMA owns the external bus
@@ -133,7 +164,7 @@ module gb (
     wire tim_irq;
     wire tim_sel = a[15:2] == 14'h3FC1; // FF04-FF07
     gb_timer timer (
-        .clk(clk), .rst(rst), .ce(ce), .addr_lo(a[7:0]), .sel(tim_sel), .wr(cpu_wr),
+        .clk(clk), .rst(rst), .ce(ce), .div_reset(stop_enter), .addr_lo(a[7:0]), .sel(tim_sel), .wr(cpu_wr),
         .din(cpu_dout), .dout(tim_q), .irq(tim_irq)
     );
 
@@ -148,7 +179,7 @@ module gb (
     wire [7:0] dma_data = (dma_src[15:14] == 2'b11) ? wram_q : ext_rd;
 
     ppu ppu (
-        .clk(clk), .rst(rst), .ce_t(clk_en), .ce(ce), .cgb_mode(cgb_mode),
+        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(ce), .cgb_mode(cgb_mode),
         .cpu_addr(a), .cpu_wr(wr_now && !(dma_act && oam_sel)), .cpu_din(cpu_dout), .cpu_dout(ppu_q),
         .vram_sel(vram_sel), .oam_sel(oam_sel), .reg_sel(preg_sel),
         .dma_act(dma_act), .dma_we(dma_act && ce), .dma_idx(dma_idx), .dma_data(dma_data),
@@ -168,16 +199,16 @@ module gb (
     end
 
     // ---------------- joypad ----------------
-    reg [1:0] joy_sel;
     reg [3:0] joy_prev;
     reg [7:0] btn_r;              // sampled at M-cycle edges (keeps CPU input paths multicycle-safe)
     wire [3:0] joy_in = ~((joy_sel[0] ? 4'h0 : btn_r[3:0]) | (joy_sel[1] ? 4'h0 : btn_r[7:4]));
     always @(posedge clk) begin
         if (rst) joy_sel <= 2'b11;
         else if (wr_now && a == 16'hFF00) joy_sel <= cpu_dout[5:4];
-        if (ce) begin joy_prev <= joy_in; btn_r <= buttons; end
+        if (stopped) begin joy_prev <= stop_joy_in; btn_r <= buttons; end
+        else if (ce) begin joy_prev <= joy_in; btn_r <= buttons; end
     end
-    wire joy_irq = ce && |(joy_prev & ~joy_in);
+    wire joy_irq = (ce && |(joy_prev & ~joy_in)) || stop_wake;
 
     // ---------------- serial (no link partner) ----------------
     // Internal clock (SC bit0=1): transfer takes 8 bits x 128 M-cycles, receives 0xFF, then IRQ.
@@ -223,6 +254,7 @@ module gb (
         else if (a == 16'hFF01)  cpu_din = sb;
         else if (a == 16'hFF02)  cpu_din = {sc[7], 6'b111111, sc[0]};
         else if (a == 16'hFF46)  cpu_din = dma_hi;
+        else if (a == 16'hFF4D)  cpu_din = cgb_mode ? {double_speed, 6'b111111, key_prepare} : 8'hFF;
         else if (a == 16'hFF70)  cpu_din = cgb_mode ? {5'b11111, svbk} : 8'hFF;
         else                     cpu_din = 8'hFF;
     end

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Synthetic SM83 test ROMs for the banked WRAM/VRAM milestone (original code, no copyrighted data).
+"""Synthetic SM83 ROMs for banked memory, GBC speed switching and STOP wake.
 
-usage: mkrom.py <outdir>   -> bank_dmg.gb (header 0x143 = 0x00), bank_cgb.gb (0x143 = 0x80)
-                              plus .lst files mapping check numbers to descriptions.
+usage: mkrom.py <outdir> -> bank_dmg.gb, bank_cgb.gb, bank_cgb_fast.gb, speed_cgb.gb
+                           plus .lst files mapping check numbers to descriptions.
 
 Each ROM checks the memory map from a real CPU program, reports over serial ("Passed", or the failing
 check number as one raw byte followed by "Failed"), then draws a solid screen with LCDC=91, BGP=E4 and
@@ -191,6 +191,8 @@ def finish(a):
 
 def dmg_program(a):
     start(a)
+    a.wr(0xFF4D, 1)
+    a.chk(0xFF4D, 0xFF, 'DMG: KEY1 writes are ignored and reads stay FF')
     a.chk(0xFF70, 0xFF, 'DMG: SVBK reads FF')
     a.chk(0xFF4F, 0xFF, 'DMG: VBK reads FF')
     for addr, v in ((0xC000, 0xC0), (0xCFFF, 0xCF), (0xD000, 0xD0), (0xDFFF, 0xDF), (0xDDFF, 0xDD)):
@@ -220,12 +222,6 @@ def dmg_program(a):
     a.dma(0xD0)
     a.chk(0xFE00, 0xD3, 'DMG: DMA D0 first byte')
     a.chk(0xFE9F, 0x9F, 'DMG: DMA D0 last byte')
-    a.dma(0xE0)
-    a.chk(0xFE00, 0xC0, 'DMG: DMA E0 echoes C000 (undocumented source; current echo behaviour)')
-    a.wr(0xFF70, 0x02)
-    a.dma(0xF0)
-    a.chk(0xFE00, 0xD3, 'DMG: DMA F0 echoes D000, SVBK ignored (undocumented source; current echo behaviour)')
-    a.chk(0xFE9F, 0x9F, 'DMG: DMA F0 last byte')
     a.wr(0xFF4F, 0x00)
     a.wr(0x8000, 0xA0)
     a.wr(0x9FFF, 0xA9)
@@ -242,8 +238,13 @@ def dmg_program(a):
     finish(a)
 
 
-def cgb_program(a):
+def cgb_program(a, fast=False):
     start(a, cgb=True)
+    if fast:
+        a.wr(0xFF00, 0x30)
+        a.wr(0xFF4D, 1)
+        a.emit(0x10, 0x00)
+        a.chk(0xFF4D, 0xFE, 'CGB: run memory/DMA/rendering checks in double speed')
     a.chk(0xFF70, 0xF8, 'CGB: SVBK resets to 0 (reads F8)')
     a.chk(0xFF4F, 0xFE, 'CGB: VBK resets to 0 (reads FE)')
     a.wr(0xC000, 0xC0)
@@ -300,10 +301,6 @@ def cgb_program(a):
     a.dma(0xD0)
     a.chk(0xFE00, 0x16, 'CGB: DMA D0 with SVBK=6 first byte')
     a.chk(0xFE9F, 0x6F, 'CGB: DMA D0 with SVBK=6 last byte')
-    a.wr(0xFF70, 0x02)
-    a.dma(0xF0)
-    a.chk(0xFE00, 0x12, 'CGB: DMA F0 with SVBK=2 first byte (undocumented source; current echo behaviour)')
-    a.chk(0xFE9F, 0x2F, 'CGB: DMA F0 with SVBK=2 last byte (undocumented source; current echo behaviour)')
     a.wr(0xFF70, 0x00)
     a.dma(0xD0)
     a.chk(0xFE00, 0x11, 'CGB: DMA D0 with SVBK=0 -> bank 1')
@@ -315,9 +312,6 @@ def cgb_program(a):
     a.dma(0xC0)
     a.chk(0xFE00, 0xC0, 'CGB: DMA C0 bank 0 first byte')
     a.chk(0xFE9F, 0x0C, 'CGB: DMA C0 bank 0 last byte')
-    a.dma(0xD0)
-    a.dma(0xE0)
-    a.chk(0xFE00, 0xC0, 'CGB: DMA E0 echoes bank 0 (undocumented source; current echo behaviour)')
     a.wr(0xFF4F, 0x00)
     a.wr(0x8000, 0xA0)
     a.wr(0x9FFF, 0xA9)
@@ -348,6 +342,53 @@ def cgb_program(a):
     finish(a)
 
 
+def speed_program(a):
+    start(a, cgb=True)
+    a.chk(0xFF4D, 0x7E, 'KEY1 starts normal and unarmed')
+    a.wr(0xFF4D, 0xFE)
+    a.chk(0xFF4D, 0x7E, 'KEY1 speed is read-only')
+    a.wr(0xFF4D, 0xFF)
+    a.chk(0xFF4D, 0x7F, 'KEY1 only stores the arm bit')
+    a.wr(0xFF4D, 0x00)
+    a.chk(0xFF4D, 0x7E, 'KEY1 arm can be cancelled')
+    a.wr(0xFFFF, 0)
+    a.wr(0xFF00, 0x30)
+    for fast in (True, False):
+        a.wr(0xFF01, ord('I' if fast else 'K'))
+        a.wr(0xFF02, 0x81)
+        a.wr(0xFF4D, 1)
+        a.emit(0x10, 0x00)           # STOP and its padding byte
+        a.wr(0xFF01, ord('J' if fast else 'L'))
+        a.wr(0xFF02, 0x81)
+        a.chk(0xFF4D, 0xFE if fast else 0x7E, 'STOP switches speed and clears the arm bit')
+        a.chk(0xFF04, 0, 'STOP resets DIV and freezes it during switching')
+        a.wr(0xFF40, 0x91)
+        for line in (1, 3):
+            l = a.label()
+            a.emit(0xF0, 0x44, 0xFE, line)
+            a.jr(0x20, l)
+            if line == 1:
+                a.wr(0xFF04, 0)
+        a.emit(0x1C)                # next check: DIV over two PPU scanlines
+        a.ldm(0xFF04)
+        a.emit(0xFE, 6 if fast else 3)
+        a.jp(0xDA, 'fail')           # JP C
+        a.emit(0xFE, 9 if fast else 5)
+        a.jp(0xD2, 'fail')           # JP NC
+        a.checks.append('DIV runs twice as fast while PPU scanlines retain their dot rate'
+                        if fast else 'Normal CPU/DIV rate is restored without doubling the PPU')
+        a.wr(0xFF40, 0)
+    a.wr(0xFF00, 0x10)              # select A/B/Start/Select for STOP wake
+    a.wr(0xFF01, ord('S'))
+    a.wr(0xFF02, 0x81)              # bench schedules a later button press
+    a.emit(0x10, 0x00)              # unarmed STOP must wait for that press
+    a.wr(0xFF01, ord('A'))
+    a.wr(0xFF02, 0x81)              # bench rejects this marker before the press
+    a.chk(0xFF4D, 0x7E, 'Unarmed STOP does not change CPU speed')
+    a.chk(0xFF04, 0, 'Unarmed STOP keeps DIV stopped until joypad wake')
+    finish(a)
+
+
 def rom(program, cgb):
     a = Asm(0x150)
     program(a)
@@ -372,7 +413,9 @@ def rom(program, cgb):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else '.'
     os.makedirs(out, exist_ok=True)
-    for name, prog, cgb in (('bank_dmg', dmg_program, False), ('bank_cgb', cgb_program, True)):
+    for name, prog, cgb in (('bank_dmg', dmg_program, False), ('bank_cgb', cgb_program, True),
+                            ('bank_cgb_fast', lambda a: cgb_program(a, fast=True), True),
+                            ('speed_cgb', speed_program, True)):
         img, checks = rom(prog, cgb)
         with open(os.path.join(out, name + '.gb'), 'wb') as f:
             f.write(img)

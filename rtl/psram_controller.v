@@ -48,7 +48,9 @@ module PsramController #(
     reg [47:0] ca;
     reg [15:0] data;
     reg configuring, writing, masked, upper;
-    reg ck, cs_n, dq_drive, rwds_drive, rwds_out;
+    reg ck, cs_n, rwds_out;
+    reg dq_oe_n, rwds_oe_n;
+    wire dq_drive = !dq_oe_n, rwds_drive = !rwds_oe_n;
     reg [7:0] dq_out, first_byte;
     reg first_valid, read_complete;
 
@@ -281,10 +283,18 @@ module PsramController #(
         else if (state == ACTIVE && !phase[0] && !ca_cycle && write_cycle)
             rwds_out <= masked && (phase[1] ? upper : !upper);
 
+    // Match the IOBUF's active-low OEN polarity directly, with no inverter
+    // between these pad-near registers and the package output enables.
+    (* BEL = "X1Y8/DFF4" *) always @(posedge clk)
+        if (!resetn || state == FINISH || abort_transfer) dq_oe_n <= 1;
+        else if (state == ACTIVE && phase == 0) dq_oe_n <= !(ca_cycle || write_cycle);
+    (* BEL = "X1Y15/DFF4" *) always @(posedge clk)
+        if (!resetn || state == FINISH || abort_transfer) rwds_oe_n <= 1;
+        else if (state == ACTIVE && phase == 0 && !ca_cycle) rwds_oe_n <= !write_cycle || configuring;
+
     always @(posedge clk) begin
         if (!resetn) begin
             state <= INIT; busy <= 1;
-            dq_drive <= 0; rwds_drive <= 0;
             recovery <= 0;
             data <= 0; configuring <= 0; writing <= 0;
             masked <= 0; upper <= 0;
@@ -304,29 +314,15 @@ module PsramController #(
             end
             PREPARE: state <= ACTIVE;
             ACTIVE: begin
-                case (phase)
-                    0: begin
-                        if (ca_cycle) dq_drive <= 1;
-                        else if (write_cycle) begin
-                            dq_drive <= 1;
-                            rwds_drive <= !configuring;
-                        end else begin dq_drive <= 0; rwds_drive <= 0; end
-                    end
-                    3: begin
-                        if (write_cycle || read_complete)
-                            state <= FINISH;
-                    end
-                endcase
+                if (phase == 3 && (write_cycle || read_complete)) state <= FINISH;
                 // Never fabricate a response to a missing memory strobe. End
                 // the physical transaction before tCSM=4us; remain busy so the
                 // bridge's existing timeout diagnostic reports the fault.
                 if (abort_transfer) begin
                     state <= FAULT;
-                    dq_drive <= 0; rwds_drive <= 0;
                 end
             end
             FINISH: begin
-                dq_drive <= 0; rwds_drive <= 0;
                 recovery <= 0; state <= RECOVER;
             end
             RECOVER: if (recovery == RECOVERY_CYCLES-1) begin state <= IDLE; busy <= 0; end

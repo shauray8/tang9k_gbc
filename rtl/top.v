@@ -1,6 +1,6 @@
 // Tang Nano 9K top: Game Boy / Game Boy Color core -> 1280x720@60 HDMI.
-// Clock domains: 27 MHz system (GB core, loader, UART; CLKOUTD3 of the PSRAM PLL), 81 MHz memory
-// fabric, 74.25 MHz video and 371.25 MHz TMDS serializer. The GB uses a fractional clock enable of
+// Clock domains: 27 MHz system (GB core, loader, UART; CLKOUTD/6 of the PSRAM PLL), 162 MHz memory
+// fabric, 74.25 MHz video and 371.25 MHz TMDS serializer. PPU dots use a fractional clock enable of
 // exactly 70224 dots per 450000 system clocks, frame-locked to the video timing, so a 6-line ring
 // buffer (1 BSRAM, rtl/video_buffer.v) replaces a full frame buffer.
 // Game: .gb image loaded into PSRAM from SPI flash @ 0x100000 on power-up / S1 (`make rom`), or over
@@ -198,12 +198,12 @@ module top (
 
     // ---------------- Game Boy ----------------
     wire pix_we; wire [1:0] pix; wire [14:0] pix_rgb; wire [7:0] px, py;
-    wire gb_vsync, tick;
+    wire gb_vsync, tick, tick_fast;
     wire [7:0] jb = joy | ubtn | {btn_sync[14], 7'b0};   // {start, select, b, a, down, up, left, right}
     wire gb_rst = rst || loading || btn_sync[15];
     wire g_req, g_we; wire [21:0] g_addr; wire [7:0] g_wd;
     gb core (
-        .clk(clk_sys), .rst(gb_rst), .clk_en(tick), .buttons(jb),
+        .clk(clk_sys), .rst(gb_rst), .clk_en(tick), .clk_en_fast(tick_fast), .buttons(jb),
         .cgb_mode(cgb_mode),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
         .lcd_on(lcd_on),
@@ -231,7 +231,7 @@ module top (
         .clk_sys(clk_sys), .rst_sys(rst), .run(!gb_rst), .lcd_on(lcd_on), .gb_vsync(gb_vsync),
         .cgb_mode(cgb_mode),
         .pix_we(pix_we), .pix_x(px), .pix_y(py), .pix(pix), .pix_rgb(pix_rgb),
-        .tick(tick), .locked(locked_v), .waitlock(waitlock),
+        .tick(tick), .tick_fast(tick_fast), .locked(locked_v), .waitlock(waitlock),
         .clk_pix(clk_pix), .rst_pix(vrst),
         .r(vr), .g(vg), .b(vb), .de(vde), .hs(vhs), .vs(vvs),
         .scanout_sig(scanout_sig), .scanout_frame(scanout_frame)

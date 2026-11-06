@@ -113,13 +113,17 @@ module tb #(parameter MEM_FREQ = 81_000_000, STRESS = 0);
     // separately enforces the tighter CPU data deadline and request-reuse interval.
     time started = 0, max_roundtrip = 0;
     reg prev_busy = 0;
+    integer sys_cycles = 0, accepted_cycle = 0;
     always @(posedge pclk) begin
+        sys_cycles = sys_cycles + 1;
         prev_busy <= b_busy;
-        if ((boot ? t_req : req) && !b_busy) started = $time;
         if (prev_busy && !b_busy) begin
+            if (b_lat != sys_cycles-accepted_cycle-1)
+                $fatal(1, "reported system round trip does not match request/ack clocks");
             if ($time - started > max_roundtrip) max_roundtrip = $time - started;
             if ($time - started > deadline_ps) $fatal(1, "bus deadline %0d ps exceeded: %0t ps", deadline_ps, $time - started);
         end
+        if ((boot ? t_req : req) && !b_busy) begin started = $time; accepted_cycle = sys_cycles; end
     end
     integer i;
     reg [7:0] last_read;

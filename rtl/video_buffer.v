@@ -43,7 +43,8 @@ module video_buffer (
     input      [7:0]  pix_y,
     input      [1:0]  pix,          // DMG shade
     input      [14:0] pix_rgb,      // CGB RGB555: bits 4:0 R, 9:5 G, 14:10 B
-    output reg        tick,         // GB clock enable
+    output reg        tick,         // PPU dots and normal-speed CPU T-cycles
+    output reg        tick_fast,    // double-speed T-cycles; includes every tick
     output reg        locked,
     output reg        waitlock,     // GB held until the frame-phase target
     // video domain
@@ -74,6 +75,7 @@ module video_buffer (
     always @(posedge clk_sys) vft_s <= {vft_s[1:0], vft};
     always @(posedge clk_sys) begin
         tick <= 1'b0;
+        tick_fast <= 1'b0;
         lcd_d <= lcd_on;
         if (rst_sys) begin
             spos <= 0; sp_ok <= 0; acc <= 0; waitlock <= 1; locked <= 0;
@@ -88,9 +90,15 @@ module video_buffer (
 
             if (waitlock) begin
                 if (sp_ok && spos == TARGET) begin waitlock <= 0; acc <= 0; end
-            end else if (acc >= SYS_FRAME - GB_FRAME) begin
-                acc <= acc + GB_FRAME - SYS_FRAME; tick <= 1'b1;
-            end else acc <= acc + GB_FRAME;
+            end else begin
+                // Reuse the dot accumulator: crossing its halfway point adds
+                // exactly one T-cycle between dots, 3-4 system clocks apart.
+                tick_fast <= acc >= SYS_FRAME - GB_FRAME ||
+                             (acc >= SYS_FRAME/2 - GB_FRAME && acc < SYS_FRAME/2);
+                if (acc >= SYS_FRAME - GB_FRAME) begin
+                    acc <= acc + GB_FRAME - SYS_FRAME; tick <= 1'b1;
+                end else acc <= acc + GB_FRAME;
+            end
 
             if (gb_vsync) begin
                 if (spos >= LOCK_LO && spos <= LOCK_HI) locked <= 1;
@@ -99,7 +107,7 @@ module video_buffer (
             if (lcd_on && !lcd_d) waitlock <= 1;    // LCD enable restarts the PPU at LY 0, dot 0
             if (vjump || !lcd_on) locked <= 0;
             if (!lcd_on) waitlock <= 0;
-            if (!run) begin waitlock <= 1; locked <= 0; tick <= 0; acc <= 0; end
+            if (!run) begin waitlock <= 1; locked <= 0; tick <= 0; tick_fast <= 0; acc <= 0; end
         end
     end
 

@@ -15,7 +15,7 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     output            busy,
     output            ready,        // PSRAM initialised
     output reg        hang,         // sticky: a request never completed (diagnostics)
-    output reg [7:0]  dbg_lat,      // PSRAM-clock cycles taken by the last request (diagnostics)
+    output reg [7:0]  dbg_lat,      // last completed round trip in clk cycles, saturating at 255
     output reg [15:0] dbg_word,     // raw word of the last read (diagnostics)
     output [7:0]      dbg_state,
     // PSRAM domain
@@ -45,13 +45,16 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
         rdy_s <= {rdy_s[0], m_ready};
         if (rst) begin
             rq_t <= 0; pend <= 0; hang <= 0; pend_cnt <= 0;
-            rd <= 0; dbg_word <= 0; ak_s <= 0; rdy_s <= 0;
+            rd <= 0; dbg_word <= 0; dbg_lat <= 0; ak_s <= 0; rdy_s <= 0;
         end
         else begin
             pend_cnt <= pend ? pend_cnt + (pend_cnt != 12'hFFF) : 12'd0;
             if (pend_cnt == 12'hFFF) hang <= 1;
             if (pend && ak_s[2] != ak_s[1]) begin
                 pend <= 0;
+                // Reuse the existing system-clock timeout counter; no separate
+                // latency counter or diagnostic feedback path in the fast domain.
+                dbg_lat <= pend_cnt >= 12'd255 ? 8'hFF : pend_cnt[7:0] + 1'b1;
                 // The controller holds this word until the next read. The
                 // synchronized acknowledgement makes it stable here, like m_data.
                 if (!we_h) dbg_word <= c_dout;
@@ -84,25 +87,6 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     // and controller word remain stable across this short pipeline stage.
     always @(posedge mclk)
         if (capture_read) m_q <= a_h[0] ? c_dout[15:8] : c_dout[7:0];
-    reg counting, lat_full, lat_carry;
-    // Registered lookahead keeps saturation and inter-nibble carry off the feedback path.
-    always @(posedge mclk) begin
-        if (!mrst_n) begin
-            dbg_lat <= 0; counting <= 0; lat_full <= 0; lat_carry <= 0;
-        end else if (c_req) begin
-            // Command is registered one edge after launch; start at one so the
-            // completed diagnostic remains launch-relative without launch fanout.
-            dbg_lat <= 1; counting <= 1; lat_full <= 0; lat_carry <= 0;
-        end else begin
-            if (counting && !lat_full) begin
-                dbg_lat[3:0] <= dbg_lat[3:0] + 1'b1;
-                if (lat_carry) dbg_lat[7:4] <= dbg_lat[7:4] + 1'b1;
-                lat_carry <= dbg_lat[3:0] == 4'he;
-                lat_full <= dbg_lat == 8'hfe;
-            end
-            if (st == 2 && c_valid) counting <= 0;
-        end
-    end
     // One command pulse; write-enable is held with the request payload.
     always @(posedge mclk) c_req <= mrst_n && launch;
     always @(posedge mclk) begin

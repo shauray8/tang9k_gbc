@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
     static unsigned short fb[144][160];
     memset(fb, 0, sizeof fb);
     std::string ser;
-    g->clk_en = 1; g->buttons = 0; g->rst = 1; g->ext_rd = 0xFF;
+    g->clk_en = 1; g->clk_en_fast = 1; g->buttons = 0; g->rst = 1; g->ext_rd = 0xFF;
     for (int i = 0; i < 8; i++) { g->clk = 0; g->eval(); g->clk = 1; g->eval(); }
     g->rst = 0;
     int frames = 0;
@@ -43,7 +43,10 @@ int main(int argc, char **argv) {
     long acc = 0;
     while (ticks < max_ticks) {
         // Same fractional enable as the 27 MHz system domain.
-        acc += 70224; g->clk_en = acc >= 450000; if (g->clk_en) { acc -= 450000; ticks++; }
+        g->clk_en_fast = acc >= 154776 && acc < 225000;
+        acc += 70224; g->clk_en = acc >= 450000;
+        g->clk_en_fast |= g->clk_en;
+        if (g->clk_en) { acc -= 450000; ticks++; }
         g->clk = 0; g->eval();
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
         g->clk = 1; g->eval();

@@ -14,15 +14,34 @@ module tb;
     reg [7:0] px = 0, py = 0;
     reg [1:0] shade = 0;
     reg [14:0] color = 0;
-    wire tick, locked, waitlock, de, hs, vs;
+    wire tick, tick_fast, locked, waitlock, de, hs, vs;
     wire [7:0] r, g, b, scan_frame;
     wire [15:0] scan_sig;
     video_buffer dut (
         .clk_sys(clk_sys), .rst_sys(rst_sys), .run(run), .lcd_on(lcd), .gb_vsync(gb_vsync),
         .cgb_mode(cgb), .pix_we(pix_we), .pix_x(px), .pix_y(py), .pix(shade), .pix_rgb(color),
-        .tick(tick), .locked(locked), .waitlock(waitlock), .clk_pix(clk_pix), .rst_pix(rst_pix),
+        .tick(tick), .tick_fast(tick_fast), .locked(locked), .waitlock(waitlock), .clk_pix(clk_pix), .rst_pix(rst_pix),
         .r(r), .g(g), .b(b), .de(de), .hs(hs), .vs(vs), .scanout_sig(scan_sig), .scanout_frame(scan_frame)
     );
+    integer tick_cycle = 0, last_fast = -1, last_dot = -1, half_ticks = 0;
+    always @(posedge clk_sys) begin
+        tick_cycle = tick_cycle + 1;
+        if (rst_sys || !run || waitlock) begin last_fast = -1; last_dot = -1; half_ticks = 0; end
+        else begin
+            if (tick && !tick_fast) $fatal(1, "double-speed enable missed a PPU dot");
+            if (tick_fast) begin
+                if (last_fast >= 0 && (tick_cycle-last_fast < 3 || tick_cycle-last_fast > 4))
+                    $fatal(1, "double-speed T-cycle interval outside 3..4 system clocks");
+                last_fast = tick_cycle;
+                half_ticks = half_ticks + 1;
+            end
+            if (tick) begin
+                if (last_dot >= 0 && half_ticks != 2) $fatal(1, "CPU/PPU enable ratio is not 2:1");
+                last_dot = tick_cycle;
+                half_ticks = 0;
+            end
+        end
+    end
     function [14:0] pattern(input integer f, y, x);
         pattern = f * 3001 + y * 160 + x;
     endfunction

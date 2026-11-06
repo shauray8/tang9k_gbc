@@ -3,6 +3,7 @@ module gb_timer (
     input            clk,
     input            rst,
     input            ce,
+    input            div_reset, // STOP resets DIV even when its M-cycle enable is paused
     input      [7:0] addr_lo,   // low byte, valid when sel
     input            sel,       // addr in FF04-FF07
     input            wr,
@@ -38,16 +39,16 @@ module gb_timer (
         irq <= 0;
         if (rst) begin
             div <= 16'hABCC; tima <= 0; tma <= 0; tac <= 0; ovf <= 0;
-        end else if (ce) begin
-            ndiv = div + 16'd4;
+        end else if (ce || div_reset) begin
+            ndiv = div_reset ? 16'd0 : div + 16'd4;
             ntac = tac;
-            if (sel && wr && addr_lo[1:0] == 2'd0) ndiv = 0;
-            if (sel && wr && addr_lo[1:0] == 2'd3) ntac = din[2:0];
+            if (ce && sel && wr && addr_lo[1:0] == 2'd0) ndiv = 0;
+            if (ce && sel && wr && addr_lo[1:0] == 2'd3) ntac = din[2:0];
             t9 = {1'b0, tima};
             if (ovf) begin t9 = {1'b0, tma}; irq <= 1; end
             ovf <= 0;
-            if (sel && wr && addr_lo[1:0] == 2'd1) t9 = {1'b0, din};
-            if (sel && wr && addr_lo[1:0] == 2'd2) begin tma <= din; if (ovf) t9 = {1'b0, din}; end
+            if (ce && sel && wr && addr_lo[1:0] == 2'd1) t9 = {1'b0, din};
+            if (ce && sel && wr && addr_lo[1:0] == 2'd2) begin tma <= din; if (ovf) t9 = {1'b0, din}; end
             // falling edge of the selected bit increments TIMA
             if (tbit(div, tac) && !tbit(ndiv, ntac)) begin
                 t9 = t9 + 1;
