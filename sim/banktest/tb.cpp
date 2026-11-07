@@ -20,7 +20,16 @@ int main(int argc, char **argv) {
     const bool cgb = ext[0x143] & 0x80;
 
     Vgb *g = new Vgb;
-    g->cart_type = 0; g->rom_mask = 1; g->ram_mask = 0; g->cgb_mode = cgb;
+    const unsigned type = ext[0x147];
+    g->cart_type = type >= 1 && type <= 3 ? 1 :
+                   type >= 0x0F && type <= 0x13 ? 2 :
+                   type >= 0x19 && type <= 0x1E ? 3 : 0;
+    g->cart_rtc = type == 0x0F || type == 0x10;
+    g->rom_mask = (2 << ext[0x148]) - 1;
+    static const unsigned ram_banks[] = {0, 1, 1, 4, 16, 8};
+    const unsigned rb = ext[0x149] < 6 ? ram_banks[ext[0x149]] : 0;
+    g->cart_ram = rb != 0;
+    g->ram_mask = rb ? rb - 1 : 0; g->cgb_mode = cgb;
     g->clk_en = 1; g->clk_en_fast = 1; g->buttons = 0; g->ext_rd = 0xFF; g->rst = 1;
     for (int i = 0; i < 8; i++) { g->clk = 0; g->eval(); g->clk = 1; g->eval(); }
     g->rst = 0;
@@ -29,7 +38,7 @@ int main(int argc, char **argv) {
     std::string ser;
     bool passed = false;
     int vs = 0, bad = 0, rc = 1;
-    const long long max_ticks = 60LL * 70224;
+    const long long max_ticks = 240LL * 70224;
     long long t = 0;
     long acc = 0;
     const bool test_stop = argc > 2 && strcmp(argv[2], "--wake-stop") == 0;

@@ -9,9 +9,11 @@ ROM    ?=
 BUILD  := build/fpga
 RTL    := rtl/top.v rtl/pll_video.v rtl/pll_psram.v rtl/hdmi.v rtl/spi_rom_loader.v rtl/cart_loader.v rtl/psram_bridge.v rtl/psram_controller.v rtl/uart_rx.v rtl/uart_tx.v rtl/gb.v rtl/sm83.v rtl/timer.v rtl/ppu.v
 RTL += rtl/psram_test.v rtl/line_capture.v rtl/video_buffer.v
+RTL += rtl/mbc3_rtc.v
 CST    := boards/tangnano9k/tangnano9k.cst
 SDC    := boards/tangnano9k/tangnano9k.sdc
 DEVICE := GW1NR-LV9QN88PC6/I5
+PNR_SEED ?= 3
 FAMILY := GW1N-9C
 
 .PHONY: all bitstream prog flash rom sim clean
@@ -24,7 +26,7 @@ $(BUILD)/gb.json: $(RTL) Makefile
 	cd $(BUILD) && yosys -q -l yosys.log -p "read_verilog $(addprefix $(CURDIR)/,$(RTL)); synth_gowin -noalu -nowidelut -top top -json gb.json"
 
 $(BUILD)/pnr.json: $(BUILD)/gb.json $(CST) $(SDC)
-	nextpnr-himbaechel -l $(BUILD)/pnr.log --json $< --write $@ --device $(DEVICE) \
+	nextpnr-himbaechel -l $(BUILD)/pnr.log --seed $(PNR_SEED) --json $< --write $@ --device $(DEVICE) \
 	  --vopt family=$(FAMILY) --vopt cst=$(CST) --sdc $(SDC) --freq 27 2>&1 | tee $(BUILD)/pnr.console.log
 
 $(BUILD)/gb.fs: $(BUILD)/pnr.json

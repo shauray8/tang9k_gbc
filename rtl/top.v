@@ -117,7 +117,7 @@ module top (
     wire ld_m_req; wire [21:0] ld_m_addr; wire [7:0] ld_m_wd;
     wire u_start = u_v && us == S_CMD && u_d == "L";
     wire [1:0] cart_type; wire [8:0] rom_mask; wire [3:0] ram_mask; wire [7:0] lsum;
-    wire cgb_mode;
+    wire cgb_mode, cart_rtc, cart_ram;
     always @(posedge clk_sys) begin
         if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0; cap_color <= 0; end
         else begin
@@ -176,7 +176,8 @@ module top (
         .in_v(us == S_ROM ? u_v : fl_v), .in_d(us == S_ROM ? u_d : fl_d),
         .full(ld_full), .done(ld_done),
         .m_req(ld_m_req), .m_addr(ld_m_addr), .m_wd(ld_m_wd), .m_busy(b_busy),
-        .cgb_mode(cgb_mode), .cart_type(cart_type), .rom_mask(rom_mask), .ram_mask(ram_mask), .sum(lsum)
+        .cgb_mode(cgb_mode), .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
+        .rom_mask(rom_mask), .ram_mask(ram_mask), .sum(lsum)
     );
 
     // Post-load self-check: read back header bytes 0x104/0x105 (0xCE 0xED in every valid ROM)
@@ -207,7 +208,8 @@ module top (
         .cgb_mode(cgb_mode),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
         .lcd_on(lcd_on),
-        .cart_type(cart_type), .rom_mask(rom_mask), .ram_mask(ram_mask),
+        .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
+        .rom_mask(rom_mask), .ram_mask(ram_mask),
         .ext_addr(g_addr), .ext_req(g_req), .ext_we(g_we), .ext_wd(g_wd), .ext_rd(b_rd),
         .ser_valid(), .ser_data(), .pc_dbg(pc)
     );

@@ -31,6 +31,8 @@ int main(int argc, char **argv) {
 
     Vgb *g = new Vgb;
     g->cart_type = cart; g->rom_mask = banks - 1; g->ram_mask = rb ? rb - 1 : 0;
+    g->cart_rtc = type == 0x0F || type == 0x10;
+    g->cart_ram = rb != 0;
     g->cgb_mode = (ext[0x143] & 0x80) != 0;
     static unsigned short fb[144][160];
     memset(fb, 0, sizeof fb);

@@ -130,7 +130,13 @@ module PsramController #(
         end
     end endgenerate
 
-    wire accept_config = state == INIT && init_done;
+    // Predict the single INIT acceptance edge alongside init_done. Registering
+    // this pulse removes the initialization decode from the CA-enable path
+    // without moving configuration or changing the external bus schedule.
+    reg accept_config;
+    always @(posedge clk)
+        if (!resetn) accept_config <= 0;
+        else accept_config <= state == INIT && !init_done && init_last;
     wire accept_request = !busy && req;
     reg start_config, start_request, start_transfer;
     always @(posedge clk)

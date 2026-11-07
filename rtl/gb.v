@@ -16,6 +16,8 @@ module gb (
     output            lcd_on,
     // cartridge (from header, set by the loader): type 0 none, 1 MBC1, 2 MBC3, 3 MBC5
     input      [1:0]  cart_type,
+    input             cart_rtc,         // header type 0F/10: MBC3 with timer
+    input             cart_ram,         // header declares cartridge RAM
     input      [8:0]  rom_mask,         // ROM bank mask (banks - 1)
     input      [3:0]  ram_mask,         // RAM bank mask
     input             cgb_mode,         // CGB-mode cartridge (header 0x143 bit 7): enables SVBK/VBK
@@ -108,8 +110,9 @@ module gb (
     reg ram_en, mbc1_mode;
     reg [8:0] rom_bank;
     reg [3:0] ram_bank;
+    reg mbc3_invalid;
     always @(posedge clk) begin
-        if (rst) begin ram_en <= 0; mbc1_mode <= 0; rom_bank <= 9'd1; ram_bank <= 0; end
+        if (rst) begin ram_en <= 0; mbc1_mode <= 0; rom_bank <= 9'd1; ram_bank <= 0; mbc3_invalid <= 0; end
         else if (wr_now && a[15] == 1'b0) case (cart_type)
             2'd1: case (a[14:13])                                   // MBC1
                 2'd0: ram_en <= cpu_dout[3:0] == 4'hA;
@@ -117,10 +120,10 @@ module gb (
                 2'd2: ram_bank[1:0] <= cpu_dout[1:0];               // also ROM bank bits 5-6
                 default: mbc1_mode <= cpu_dout[0];
             endcase
-            2'd2: case (a[14:13])                                   // MBC3 (no RTC)
+            2'd2: case (a[14:13])                                   // MBC3 RAM/RTC selection
                 2'd0: ram_en <= cpu_dout[3:0] == 4'hA;
                 2'd1: rom_bank[6:0] <= cpu_dout[6:0] == 0 ? 7'd1 : cpu_dout[6:0];
-                2'd2: ram_bank <= {2'b00, cpu_dout[1:0]};
+                2'd2: begin ram_bank <= cpu_dout[3:0]; mbc3_invalid <= |cpu_dout[7:4]; end
                 default: ;
             endcase
             2'd3: case (a[14:12])                                   // MBC5
@@ -139,7 +142,20 @@ module gb (
     wire [8:0] bank = (ma[14] ? bank_hi : bank_lo) & rom_mask;
     wire [3:0] rbank = (mbc1 && !mbc1_mode ? 4'd0 : ram_bank) & ram_mask;
     wire rom_sel = ma[15] == 1'b0;
-    wire cram_sel = ma[15:13] == 3'b101 && ram_en && cart_type != 2'd0;
+    wire mbc3 = cart_type == 2'd2;
+    wire cart_window = ma[15:13] == 3'b101 && ram_en;
+    wire cram_sel = cart_window && cart_ram && cart_type != 2'd0 &&
+                    (!mbc3 || (!mbc3_invalid && !ram_bank[3]));
+    wire rtc_sel = cart_window && mbc3 && cart_rtc && !mbc3_invalid &&
+                   ram_bank >= 4'h8 && ram_bank <= 4'hC;
+    wire [7:0] rtc_q;
+    wire [7:0] cart_q = rtc_sel ? rtc_q : cram_sel ? ext_rd : 8'hFF;
+    mbc3_rtc rtc (
+        .clk(clk), .rst(rst || !cart_rtc),
+        .latch_wr(wr_now && mbc3 && cart_rtc && a[15:13] == 3'b011),
+        .data_wr(wr_now && !cpu_blk && rtc_sel), .select(ram_bank),
+        .din(cpu_dout), .dout(rtc_q)
+    );
     assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} : {5'b11111, rbank, ma[12:0]};
     reg cyc_start;                // also set right after reset: the first opcode fetch (0100) needs a request
     always @(posedge clk) cyc_start <= ce || rst || hdma_release;
@@ -191,9 +207,9 @@ module gb (
                     (a >= 16'hFF68 && a <= 16'hFF6C);
     wire ppu_vblank, ppu_stat;
     // ROM/cart RAM/WRAM (VRAM source unsupported); WRAM sources follow SVBK and the echo map via ma
-    wire [7:0] dma_data = (dma_src[15:14] == 2'b11) ? wram_q : ext_rd;
+    wire [7:0] dma_data = dma_src[15:14] == 2'b11 ? wram_q : rom_sel ? ext_rd : cart_q;
     wire [7:0] hdma_data = hdma_src[15:13] == 3'b110 ? wram_q :
-                           (rom_sel || cram_sel) ? ext_rd : 8'hFF;
+                           rom_sel ? ext_rd : cart_q;
 
     ppu ppu (
         .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release), .cgb_mode(cgb_mode),
@@ -322,7 +338,7 @@ module gb (
         if (cpu_blk)             cpu_din = 8'hFF;
         else if (a[15] == 1'b0)  cpu_din = ext_rd;
         else if (vram_sel)       cpu_din = ppu_q;
-        else if (a[15:13] == 3'b101) cpu_din = cram_sel ? ext_rd : 8'hFF;
+        else if (a[15:13] == 3'b101) cpu_din = cart_q;
         else if (wram_sel)       cpu_din = wram_q;
         else if (oam_sel)        cpu_din = ppu_q;
         else if (hram_sel)       cpu_din = hram_q;

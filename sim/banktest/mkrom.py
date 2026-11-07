@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Synthetic SM83 ROMs for banked memory, GBC speed switching, STOP and VRAM DMA.
+"""Synthetic SM83 ROMs for banking, GBC speed switching, STOP, VRAM DMA and MBC3 RTC.
 
 usage: mkrom.py <outdir> -> bank_dmg.gb, bank_cgb.gb, bank_cgb_fast.gb, speed_cgb.gb,
-                           vram_dma_cgb.gb, vram_dma_cgb_fast.gb and numbered .lst files.
+                           vram_dma_cgb.gb, vram_dma_cgb_fast.gb, mbc3_rtc.gb,
+                           mbc3_no_rtc.gb, mbc3_timer_only.gb and numbered .lst files.
 
 Each ROM checks the memory map from a real CPU program, reports over serial ("Passed", or the failing
 check number as one raw byte followed by "Failed"), then draws a solid screen with LCDC=91, BGP=E4 and
@@ -10,6 +11,9 @@ loops: shade 1 = pass, shade 3 = fail (BG map cleared to tile 0; tile 0 low byte
 
 VRAM DMA cases cover alignment, bank selection, 2048-byte ROM transfers, CPU stalls with
 DIV running, destination overflow, visible-HBlank scheduling, cancellation/resume and HALT.
+MBC3 cases cover RTC/RAM isolation, missing timer/RAM hardware, enable gating, latch sequences,
+and real-time second progression across both CPU speeds. tb_rtc.v covers counter rollover,
+sticky day carry and halt/resume with an accelerated oscillator, not altered register logic.
 """
 import os
 import sys
@@ -515,7 +519,80 @@ def vram_dma_program(a, fast=False):
     finish(a)
 
 
-def rom(program, cgb):
+def mbc3_program(a, clock=True, ram=True):
+    start(a, cgb=True)
+    a.wr(0x0000, 0x0A)
+    a.wr(0x4000, 0)
+    a.wr(0xA000, 0x5A)
+    a.chk(0xA000, 0x5A if ram else 0xFF, 'RAM presence follows the cartridge header')
+    if ram:
+        a.wr(0x4000, 3)
+        a.wr(0xA000, 0xA7)
+    a.wr(0x4000, 0x0C)
+    a.wr(0xA000, 0xC1)              # halt before setting the live clock
+    for register, value in ((8, 42), (9, 17), (10, 23), (11, 0xFF)):
+        a.wr(0x4000, register)
+        a.wr(0xA000, value)
+    a.wr(0x6000, 0)
+    a.wr(0x6000, 1)
+    for register, value in ((8, 42), (9, 17), (10, 23), (11, 0xFF), (12, 0xC1)):
+        a.wr(0x4000, register)
+        a.chk(0xB123, value if clock else 0xFF, 'RTC selected register maps the whole A000-BFFF window')
+    a.wr(0x4000, 8)
+    a.wr(0xA000, 21)
+    a.chk(0xA000, 42 if clock else 0xFF, 'Live RTC writes do not change the latched snapshot')
+    a.wr(0x6000, 1)
+    a.chk(0xA000, 42 if clock else 0xFF, 'Latch requires a preceding zero')
+    for value in (0, 2, 1):
+        a.wr(0x6000, value)
+    a.chk(0xA000, 42 if clock else 0xFF, 'An intervening value cancels latch arming')
+    a.wr(0x6000, 0)
+    a.wr(0x6000, 1)
+    a.chk(0xA000, 21 if clock else 0xFF, 'Zero-to-one latch captures the new live value')
+    a.wr(0x0000, 0)
+    a.chk(0xA000, 0xFF, 'Disabled RTC reads are open bus')
+    a.wr(0xA000, 55)
+    a.wr(0x0000, 0x0A)
+    for invalid in (0x0D, 0x18, 0x80):
+        a.wr(0x4000, invalid)
+        a.wr(0xA000, 33)
+        a.chk(0xA000, 0xFF, 'Invalid MBC3 selectors do not alias RAM or RTC')
+    a.wr(0x4000, 8)
+    a.wr(0x6000, 0)
+    a.wr(0x6000, 1)
+    a.chk(0xA000, 21 if clock else 0xFF, 'Disabled/invalid writes leave the live clock intact')
+    a.wr(0x4000, 0)
+    a.chk(0xA000, 0x5A if ram else 0xFF, 'RTC writes never overwrite RAM bank 0')
+    if ram:
+        a.wr(0x4000, 3)
+        a.chk(0xA000, 0xA7, 'RTC/invalid writes never overwrite RAM bank 3')
+    if clock and ram:
+        a.wr(0x4000, 12)
+        a.wr(0xA000, 0x40)
+        a.wr(0x4000, 8)
+        a.wr(0xA000, 0)
+        a.wr(0x4000, 12)
+        a.wr(0xA000, 0)
+        a.wr(0xFF40, 0x91)
+        for elapsed in (1, 2):
+            if elapsed == 2:
+                a.wr(0xFF00, 0x30)
+                a.wr(0xFF4D, 1)
+                a.emit(0x10, 0)
+            a.emit(0x16, 62)         # LD D,62; wait 62 complete video frames
+            l = a.label()
+            wait_ly(a, 144)
+            wait_ly(a, 0)
+            a.emit(0x15)
+            a.jr(0x20, l)
+            a.wr(0x6000, 0)
+            a.wr(0x6000, 1)
+            a.wr(0x4000, 8)
+            a.chk(0xA000, elapsed, 'RTC runs at wall-clock rate in normal and double speed')
+    finish(a)
+
+
+def rom(program, cgb, mapper=0, ram_size=0):
     a = Asm(0x150)
     program(a)
     code = a.link()
@@ -524,7 +601,9 @@ def rom(program, cgb):
     img[0x104:0x134] = bytes(0x30)                       # no logo (core has no boot ROM)
     img[0x134:0x143] = b'BANKTEST'.ljust(15, b'\0')
     img[0x143] = 0x80 if cgb else 0x00
-    img[0x144:0x14D] = bytes(9)                          # licensee, SGB, type 0, 32 KiB, no RAM
+    img[0x144:0x14D] = bytes(9)                          # default header: 32 KiB, mapper/RAM below
+    img[0x147] = mapper
+    img[0x149] = ram_size
     img[0x14A] = 0x01
     x = 0
     for i in range(0x134, 0x14D):
@@ -541,12 +620,17 @@ def rom(program, cgb):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else '.'
     os.makedirs(out, exist_ok=True)
-    for name, prog, cgb in (('bank_dmg', dmg_program, False), ('bank_cgb', cgb_program, True),
-                            ('bank_cgb_fast', lambda a: cgb_program(a, fast=True), True),
-                            ('speed_cgb', speed_program, True),
-                            ('vram_dma_cgb', vram_dma_program, True),
-                            ('vram_dma_cgb_fast', lambda a: vram_dma_program(a, True), True)):
-        img, checks = rom(prog, cgb)
+    for name, prog, cgb, mapper, ram_size in (
+            ('bank_dmg', dmg_program, False, 0, 0),
+            ('bank_cgb', cgb_program, True, 0, 0),
+            ('bank_cgb_fast', lambda a: cgb_program(a, fast=True), True, 0, 0),
+            ('speed_cgb', speed_program, True, 0, 0),
+            ('vram_dma_cgb', vram_dma_program, True, 0, 0),
+            ('vram_dma_cgb_fast', lambda a: vram_dma_program(a, True), True, 0, 0),
+            ('mbc3_rtc', mbc3_program, True, 0x10, 3),
+            ('mbc3_no_rtc', lambda a: mbc3_program(a, clock=False), True, 0x13, 3),
+            ('mbc3_timer_only', lambda a: mbc3_program(a, ram=False), True, 0x0F, 0)):
+        img, checks = rom(prog, cgb, mapper, ram_size)
         with open(os.path.join(out, name + '.gb'), 'wb') as f:
             f.write(img)
         with open(os.path.join(out, name + '.lst'), 'w') as f:
