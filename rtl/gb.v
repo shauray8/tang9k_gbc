@@ -41,8 +41,22 @@ module gb (
     wire cpu_tick = double_speed ? clk_en_fast : clk_en;
     wire cpu_mcycle = cpu_tick && tdiv == 2'd3;
     wire ce = cpu_mcycle && !stopped && speed_wait == 0;
+    reg hdma_active, hdma_hblank, hdma_busy, hdma_pending, hdma_half, hdma_used, hdma_req;
+    reg [15:0] hdma_src;
+    reg [12:0] hdma_dst;
+    reg [6:0] hdma_left;
+    wire cpu_halted, ppu_hblank;
+    wire hdma_start = hdma_pending && hdma_active && !dma_act && !cpu_halted &&
+                      (!hdma_hblank || (ppu_hblank && !hdma_used));
+    wire hdma_owns = hdma_busy || hdma_start;
+    wire hdma_hold = hdma_busy || hdma_pending || (hdma_active && !hdma_hblank);
+    wire cpu_ce = ce && !hdma_hold;
+    wire hdma_put = hdma_busy && clk_en && hdma_half;
+    wire hdma_block_end = hdma_src[3:0] == 4'hF;
+    wire hdma_release = hdma_put && (hdma_dst == 13'h1FFF ||
+                       (hdma_block_end && (hdma_left == 0 || hdma_hblank)));
     always @(posedge clk)
-        if (rst || stop_enter) tdiv <= 0;
+        if (rst || stop_enter || hdma_release) tdiv <= 0;
         else if (cpu_tick) tdiv <= tdiv + 1'b1;
 
     wire [15:0] a;
@@ -52,11 +66,11 @@ module gb (
     wire [4:0] irq;
 
     sm83 cpu (
-        .clk(clk), .rst(rst), .ce(ce), .addr(a), .dout(cpu_dout), .wr(cpu_wr), .rd(cpu_rd),
-        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .halted(), .stop_req(stop_req), .pc_dbg(pc_dbg)
+        .clk(clk), .rst(rst), .ce(cpu_ce), .addr(a), .dout(cpu_dout), .wr(cpu_wr), .rd(cpu_rd),
+        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .halted(cpu_halted), .stop_req(stop_req), .pc_dbg(pc_dbg)
     );
 
-    wire wr_now = ce && cpu_wr;
+    wire wr_now = cpu_ce && cpu_wr;
 
     // STOP arms an oscillator pause, not a derived clock. PPU dots continue
     // during speed switching; normal STOP also stops them until joypad wake.
@@ -84,7 +98,7 @@ module gb (
     reg dma_act;
     reg [7:0] dma_hi, dma_idx;
     wire [15:0] dma_src = {dma_hi, dma_idx};
-    wire [15:0] ma = dma_act ? dma_src : a;   // external-bus address
+    wire [15:0] ma = hdma_owns ? hdma_src : dma_act ? dma_src : a;
     wire cpu_blk = dma_act && a[15:8] != 8'hFF; // CPU locked out of everything but HRAM/IO
 
     // ---------------- cartridge: MBC1/3/5 mapping onto external memory (PSRAM) ----------------
@@ -128,10 +142,11 @@ module gb (
     wire cram_sel = ma[15:13] == 3'b101 && ram_en && cart_type != 2'd0;
     assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} : {5'b11111, rbank, ma[12:0]};
     reg cyc_start;                // also set right after reset: the first opcode fetch (0100) needs a request
-    always @(posedge clk) cyc_start <= ce || rst;
-    assign ext_req = cyc_start && !rst && (rom_sel || cram_sel) &&
-                     !(cpu_wr && !dma_act && rom_sel);                 // ROM writes are MBC registers
-    assign ext_we = cpu_wr && !dma_act && cram_sel;
+    always @(posedge clk) cyc_start <= ce || rst || hdma_release;
+    assign ext_req = !rst && (rom_sel || cram_sel) &&
+                     (hdma_owns ? (hdma_start || hdma_req) :
+                      cyc_start && !(cpu_wr && !dma_act && rom_sel));
+    assign ext_we = !hdma_owns && cpu_wr && !dma_act && cram_sel;
     assign ext_wd = cpu_dout;
 
     // WRAM: 8 x 4 KiB. C000-CFFF is bank 0; D000-DFFF is SVBK bank 1..7 (0 selects 1). E000-FDFF echoes
@@ -164,7 +179,7 @@ module gb (
     wire tim_irq;
     wire tim_sel = a[15:2] == 14'h3FC1; // FF04-FF07
     gb_timer timer (
-        .clk(clk), .rst(rst), .ce(ce), .div_reset(stop_enter), .addr_lo(a[7:0]), .sel(tim_sel), .wr(cpu_wr),
+        .clk(clk), .rst(rst), .ce(ce), .div_reset(stop_enter), .addr_lo(a[7:0]), .sel(tim_sel), .wr(wr_now),
         .din(cpu_dout), .dout(tim_q), .irq(tim_irq)
     );
 
@@ -177,13 +192,18 @@ module gb (
     wire ppu_vblank, ppu_stat;
     // ROM/cart RAM/WRAM (VRAM source unsupported); WRAM sources follow SVBK and the echo map via ma
     wire [7:0] dma_data = (dma_src[15:14] == 2'b11) ? wram_q : ext_rd;
+    wire [7:0] hdma_data = hdma_src[15:13] == 3'b110 ? wram_q :
+                           (rom_sel || cram_sel) ? ext_rd : 8'hFF;
 
     ppu ppu (
-        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(ce), .cgb_mode(cgb_mode),
-        .cpu_addr(a), .cpu_wr(wr_now && !(dma_act && oam_sel)), .cpu_din(cpu_dout), .cpu_dout(ppu_q),
-        .vram_sel(vram_sel), .oam_sel(oam_sel), .reg_sel(preg_sel),
+        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release), .cgb_mode(cgb_mode),
+        .cpu_addr(hdma_busy ? {3'b100, hdma_dst} : a),
+        .cpu_wr(hdma_busy ? hdma_put : wr_now && !(dma_act && oam_sel)),
+        .cpu_din(hdma_busy ? hdma_data : cpu_dout), .cpu_dout(ppu_q),
+        .vram_sel(hdma_busy || vram_sel), .vram_dma(hdma_busy),
+        .oam_sel(!hdma_busy && oam_sel), .reg_sel(!hdma_busy && preg_sel),
         .dma_act(dma_act), .dma_we(dma_act && ce), .dma_idx(dma_idx), .dma_data(dma_data),
-        .irq_vblank(ppu_vblank), .irq_stat(ppu_stat),
+        .irq_vblank(ppu_vblank), .irq_stat(ppu_stat), .hblank(ppu_hblank),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(pix_x), .pix_y(pix_y), .vsync(vsync), .lcd_on(lcd_on)
     );
 
@@ -195,6 +215,64 @@ module gb (
                 if (dma_idx == 8'd159) dma_act <= 0;
             end
             if (wr_now && a == 16'hFF46) begin dma_act <= 1; dma_hi <= cpu_dout; dma_idx <= 0; end
+        end
+    end
+
+    // One byte per two PPU dots, at either CPU speed. The one-clock pending
+    // grant observes HALT/OAM DMA entered on the preceding CPU edge.
+    // Releasing the bus reissues the held CPU read and gives it a full M-cycle.
+    always @(posedge clk) begin
+        if (rst) begin
+            hdma_active <= 0; hdma_hblank <= 0; hdma_busy <= 0;
+            hdma_pending <= 0; hdma_half <= 0; hdma_used <= 0; hdma_req <= 0;
+            hdma_src <= 0; hdma_dst <= 0; hdma_left <= 7'h7F;
+        end else begin
+            hdma_req <= 0;
+            hdma_pending <= 0;
+            if (!ppu_hblank) hdma_used <= 0;
+            if (ce && hdma_active && !hdma_busy && !hdma_pending &&
+                !dma_act && !cpu_halted &&
+                (!hdma_hblank || (ppu_hblank && !hdma_used)))
+                hdma_pending <= 1;
+            if (hdma_start) begin
+                hdma_busy <= 1;
+                hdma_half <= 0;
+                if (hdma_hblank) hdma_used <= 1;
+            end
+            if (hdma_busy && clk_en) begin
+                hdma_half <= !hdma_half;
+                if (hdma_half) begin
+                    hdma_src <= hdma_src + 1'b1;
+                    hdma_dst <= hdma_dst + 1'b1;
+                    if (hdma_block_end) hdma_left <= hdma_left - 1'b1;
+                    if (hdma_release) hdma_busy <= 0;
+                    else hdma_req <= 1;
+                    if (hdma_dst == 13'h1FFF || (hdma_block_end && hdma_left == 0)) begin
+                        hdma_active <= 0;
+                        hdma_left <= 7'h7F;
+                    end
+                end
+            end
+            if (wr_now && cgb_mode) case (a)
+                16'hFF51: if (!hdma_active) hdma_src[15:8] <= cpu_dout;
+                16'hFF52: if (!hdma_active) hdma_src[7:0] <= {cpu_dout[7:4], 4'b0};
+                16'hFF53: if (!hdma_active) hdma_dst[12:8] <= cpu_dout[4:0];
+                16'hFF54: if (!hdma_active) hdma_dst[7:0] <= {cpu_dout[7:4], 4'b0};
+                16'hFF55: begin
+                    if (hdma_active) begin
+                        if (hdma_hblank && !cpu_dout[7]) begin
+                            hdma_active <= 0;
+                            hdma_pending <= 0;
+                        end
+                    end else begin
+                        hdma_active <= 1;
+                        hdma_hblank <= cpu_dout[7];
+                        hdma_left <= cpu_dout[6:0];
+                        if (!cpu_dout[7]) hdma_pending <= 1;
+                    end
+                end
+                default: ;
+            endcase
         end
     end
 
@@ -255,6 +333,7 @@ module gb (
         else if (a == 16'hFF02)  cpu_din = {sc[7], 6'b111111, sc[0]};
         else if (a == 16'hFF46)  cpu_din = dma_hi;
         else if (a == 16'hFF4D)  cpu_din = cgb_mode ? {double_speed, 6'b111111, key_prepare} : 8'hFF;
+        else if (a == 16'hFF55)  cpu_din = cgb_mode ? {!hdma_active, hdma_left} : 8'hFF;
         else if (a == 16'hFF70)  cpu_din = cgb_mode ? {5'b11111, svbk} : 8'hFF;
         else                     cpu_din = 8'hFF;
     end

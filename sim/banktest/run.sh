@@ -11,6 +11,6 @@ verilator --cc --exe --build -O3 -j 0 -Wno-fatal -Wno-WIDTH -Wno-CASEINCOMPLETE 
   --top-module gb -Mdir "$out/obj" \
   "$root"/rtl/sm83.v "$root"/rtl/timer.v "$root"/rtl/ppu.v "$root"/rtl/gb.v "$here/tb.cpp" >/dev/null
 rc=0
-for r in bank_dmg bank_cgb bank_cgb_fast; do "$out/obj/Vgb" "$out/$r.gb" || rc=1; done
+for r in bank_dmg bank_cgb bank_cgb_fast vram_dma_cgb vram_dma_cgb_fast; do "$out/obj/Vgb" "$out/$r.gb" || rc=1; done
 "$out/obj/Vgb" "$out/speed_cgb.gb" --wake-stop || rc=1
 exit $rc

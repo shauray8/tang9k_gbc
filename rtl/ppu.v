@@ -19,6 +19,7 @@ module ppu (
     input      [7:0]  cpu_din,
     output reg [7:0]  cpu_dout,
     input             vram_sel,
+    input             vram_dma,    // CGB DMA owns VRAM even during mode 3
     input             oam_sel,
     input             reg_sel,     // FF40-FF45, FF47-FF4B, FF4F, FF68-FF6C
     input             dma_act,
@@ -33,7 +34,8 @@ module ppu (
     output reg [7:0]  pix_x,
     output     [7:0]  pix_y,
     output reg        vsync,       // pulse at start of frame (LY=0, dot 0) while LCD on
-    output            lcd_on
+    output            lcd_on,
+    output            hblank
 );
     // ---------------- registers ----------------
     reg [7:0] LCDC, SCY, SCX, LYC, BGP, OBP0, OBP1, WY, WX;
@@ -46,6 +48,7 @@ module ppu (
     reg [1:0] mode;
     assign pix_y = ly;
     assign lcd_on = LCDC[7];
+    assign hblank = LCDC[7] && ly < 8'd144 && mode == 2'd0;
 
     wire cpu_vram_ok = mode != 2'd3;
     wire cpu_oam_ok  = !mode[1] && !dma_act;
@@ -62,7 +65,7 @@ module ppu (
     end
     reg cpu_slot1, cpu_slot2;     // clk after ce: CPU read issue; clk after that: capture
     reg [7:0] cpu_vq;
-    wire cpu_vwr = cpu_wr && vram_sel && cpu_vram_ok;
+    wire cpu_vwr = cpu_wr && vram_sel && (cpu_vram_ok || vram_dma);
     wire cpu_vrd = cpu_slot1 && vram_sel && cpu_vram_ok;
     wire cpu_owns = cpu_vwr || cpu_vrd;
     reg [13:0] ppu_va;            // driven combinationally below: {bank, offset}

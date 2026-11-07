@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Synthetic SM83 ROMs for banked memory, GBC speed switching and STOP wake.
+"""Synthetic SM83 ROMs for banked memory, GBC speed switching, STOP and VRAM DMA.
 
-usage: mkrom.py <outdir> -> bank_dmg.gb, bank_cgb.gb, bank_cgb_fast.gb, speed_cgb.gb
-                           plus .lst files mapping check numbers to descriptions.
+usage: mkrom.py <outdir> -> bank_dmg.gb, bank_cgb.gb, bank_cgb_fast.gb, speed_cgb.gb,
+                           vram_dma_cgb.gb, vram_dma_cgb_fast.gb and numbered .lst files.
 
 Each ROM checks the memory map from a real CPU program, reports over serial ("Passed", or the failing
 check number as one raw byte followed by "Failed"), then draws a solid screen with LCDC=91, BGP=E4 and
 loops: shade 1 = pass, shade 3 = fail (BG map cleared to tile 0; tile 0 low bytes FF, high 00/FF).
+
+VRAM DMA cases cover alignment, bank selection, 2048-byte ROM transfers, CPU stalls with
+DIV running, destination overflow, visible-HBlank scheduling, cancellation/resume and HALT.
 """
 import os
 import sys
@@ -389,6 +392,129 @@ def speed_program(a):
     finish(a)
 
 
+def vdma_start(a, source, destination, control):
+    for register, value in zip(range(0xFF51, 0xFF56),
+                               (source >> 8, source & 255, destination >> 8,
+                                destination & 255, control)):
+        a.wr(register, value)
+
+
+def wait_ly(a, line):
+    l = a.label()
+    a.emit(0xF0, 0x44, 0xFE, line)
+    a.jr(0x20, l)
+
+
+def vdma_wait(a):
+    l = a.label()
+    a.emit(0xF0, 0x55, 0xFE, 0xFF)
+    a.jr(0x20, l)
+
+
+def vram_dma_program(a, fast=False):
+    start(a, cgb=True)
+    if fast:
+        a.wr(0xFF00, 0x30)
+        a.wr(0xFF4D, 1)
+        a.emit(0x10, 0)
+        a.chk(0xFF4D, 0xFE)
+    for register in range(0xFF51, 0xFF55):
+        a.wr(register, 0xA5)
+        a.chk(register, 0xFF, 'DMA address registers are write-only')
+    a.wr(0xFF4F, 0)
+    a.wr(0x8000, 0xC3)
+    a.wr(0x9FEF, 0xA5)
+    for i in range(48):
+        a.wr(0xC200+i, (i*7+3) & 255)
+    vdma_start(a, 0xC20B, 0xFFFF, 0)
+    a.chk(0xFF55, 0xFF, 'GDMA completes before CPU resumes')
+    for i in range(16):
+        a.chk(0x9FF0+i, (i*7+3) & 255, 'GDMA address masking and data')
+    a.chk(0x9FEF, 0xA5, 'GDMA lower guard')
+    a.chk(0x8000, 0xC3, 'GDMA upper guard')
+    for bank in (3, 7):
+        a.wr(0xFF70, bank)
+        for i in range(32):
+            a.wr(0xD200+i, (bank*17+i*3) & 255)
+    a.wr(0xFF4F, 1)
+    vdma_start(a, 0xD200, 0x8100, 1)
+    for i in range(32):
+        a.chk(0x8100+i, (7*17+i*3) & 255, 'GDMA selected SVBK and VBK')
+    a.wr(0xFF4F, 0)
+    a.wr(0xFF04, 0)
+    vdma_start(a, 0x7000, 0x9000, 0x7F)
+    a.emit(0x1C)
+    a.ldm(0xFF04)
+    a.emit(0xFE, 32 if fast else 16)
+    a.jp(0xDA, 'fail')
+    a.emit(0xFE, 35 if fast else 18)
+    a.jp(0xD2, 'fail')
+    a.checks.append('Maximum GDMA fixed dot duration; DIV continues')
+    a.emit(0x1C, 0xD5)              # preserve check number while DE is source pointer
+    a.w16(0x21, 0x9000)
+    a.w16(0x11, 0x7000)
+    a.w16(0x01, 0x0800)
+    l = a.label()
+    a.emit(0x1A, 0xBE)
+    a.jp(0xC2, 'vdma_mismatch')
+    a.emit(0x13, 0x23, 0x0B, 0x78, 0xB1)
+    a.jr(0x20, l)
+    a.emit(0xD1)
+    a.jp(0xC3, 'vdma_compared')
+    a.label('vdma_mismatch')
+    a.emit(0xD1)
+    a.jp(0xC3, 'fail')
+    a.label('vdma_compared')
+    a.checks.append('All 2048 ROM-source DMA bytes match')
+    vdma_start(a, 0x7000, 0x9FF0, 1)
+    a.emit(0x1C)
+    a.ldm(0xFF55)
+    a.emit(0xE6, 0x80)
+    a._check(0x80, 'Destination overflow stops DMA')
+    a.chk(0x8000, 0xC3, 'Overflow never wraps into 8000')
+    a.fill(0x8800, 64, 0xA5)
+    a.wr(0xFF40, 0x91)
+    wait_ly(a, 144)
+    vdma_start(a, 0xC200, 0x8800, 0x82)
+    wait_ly(a, 153)
+    a.chk(0xFF55, 2, 'No HBlank DMA during VBlank')
+    a.chk(0x8800, 0xA5, 'VBlank leaves destination untouched')
+    wait_ly(a, 0)
+    l = a.label()
+    a.emit(0xF0, 0x55, 0xFE, 2)
+    a.jr(0x28, l)
+    a.wr(0xFF55, 0)
+    a.chk(0xFF55, 0x81, 'Cancelled with two blocks remaining')
+    wait_ly(a, 2)
+    a.wr(0xFF40, 0)
+    for i in range(48):
+        a.chk(0x8800+i, (i*7+3) & 255 if i < 16 else 0xA5,
+              'Exactly one block before cancellation')
+    a.wr(0xFF40, 0x91)
+    wait_ly(a, 0)
+    a.wr(0xFF55, 0x81)
+    vdma_wait(a)
+    a.wr(0xFF40, 0)
+    for i in range(48):
+        a.chk(0x8800+i, (i*7+3) & 255, 'Resume retains source and destination')
+    a.chk(0x8830, 0xA5, 'HBlank DMA length guard')
+    a.fill(0x8A00, 32, 0xA5)
+    a.wr(0xFFFF, 1)
+    a.wr(0xFF0F, 0)
+    a.wr(0xFF40, 0x91)
+    wait_ly(a, 0)
+    vdma_start(a, 0xC200, 0x8A00, 0x81)
+    a.emit(0x76)
+    a.chk(0xFF55, 1, 'HALT suspends HDMA until VBlank interrupt wakes CPU')
+    a.wr(0xFFFF, 0)
+    a.wr(0xFF0F, 0)
+    vdma_wait(a)
+    a.wr(0xFF40, 0)
+    for i in range(32):
+        a.chk(0x8A00+i, (i*7+3) & 255, 'HDMA resumes after HALT')
+    finish(a)
+
+
 def rom(program, cgb):
     a = Asm(0x150)
     program(a)
@@ -404,6 +530,8 @@ def rom(program, cgb):
     for i in range(0x134, 0x14D):
         x = (x - img[i] - 1) & 0xFF
     img[0x14D] = x
+    assert 0x150 + len(code) <= 0x7000, 'program overlaps DMA ROM payload'
+    img[0x7000:0x7800] = bytes((i*29+0x37) & 255 for i in range(2048))
     img[0x150:0x150 + len(code)] = code
     s = (sum(img) - img[0x14E] - img[0x14F]) & 0xFFFF
     img[0x14E], img[0x14F] = s >> 8, s & 0xFF
@@ -415,7 +543,9 @@ def main():
     os.makedirs(out, exist_ok=True)
     for name, prog, cgb in (('bank_dmg', dmg_program, False), ('bank_cgb', cgb_program, True),
                             ('bank_cgb_fast', lambda a: cgb_program(a, fast=True), True),
-                            ('speed_cgb', speed_program, True)):
+                            ('speed_cgb', speed_program, True),
+                            ('vram_dma_cgb', vram_dma_program, True),
+                            ('vram_dma_cgb_fast', lambda a: vram_dma_program(a, True), True)):
         img, checks = rom(prog, cgb)
         with open(os.path.join(out, name + '.gb'), 'wb') as f:
             f.write(img)
