@@ -45,6 +45,8 @@ class Library:
     def __init__(self, link, folder, covers=None):
         self.link, self.folder, self.covers = link, Path(folder), covers
         self.games = []
+        self.query = ""
+        self.total = 0
         self.active = False
         self.decoder = Requests()
         self.image = menu.ROOT / 'build/launcher/library.gbc'
@@ -64,8 +66,10 @@ class Library:
         return not self.busy and self._error is None
 
     def prepare(self):
-        games = menu.library(self.folder)
-        image = menu.build(games, self.covers)
+        catalog = menu.library(self.folder)
+        games = menu.filter_games(catalog, self.query)
+        image = menu.build(games, self.covers, query=self.query, total=len(catalog))
+        self.total = len(catalog)
         self.image.parent.mkdir(parents=True, exist_ok=True)
         self.image.write_bytes(image)
         self.games = games
@@ -77,6 +81,12 @@ class Library:
         if self.busy:
             return self.progress
         return self._start(self.prepare(), None)
+
+    def search(self, query):
+        if self.busy or not self.active:
+            return "Open the library with F1 / Home before searching."
+        self.query = ' '.join(query.split())
+        return self.home()
 
     def _start(self, path, game):
         # One worker owns USB during a transfer. Tk only reads progress and

@@ -49,17 +49,30 @@ class MenuTests(unittest.TestCase):
         self.run_menu(0, '5:8:16,15:18:1,25:28:128', [])
 
     def test_single_game_wraps(self):
-        self.run_menu(1, '5:8:2,20:23:16', [0])
+        self.run_menu(1, '5:8:4,20:23:16', [0])
 
     def test_bank_boundary_selection(self):
-        self.run_menu(34, '5:8:2,20:23:16', [33])
+        self.run_menu(34, '5:8:4,20:23:16', [33])
 
     def test_index_above_255_and_wrap_back(self):
-        self.run_menu(260, '5:8:2,20:23:16', [259])
-        self.run_menu(260, '5:8:2,12:15:1,25:28:16', [0])
+        self.run_menu(260, '5:8:4,20:23:16', [259])
+        self.run_menu(260, '5:8:4,12:15:8,25:28:16', [0])
 
     def test_disabled_card_does_not_launch_but_navigation_continues(self):
-        self.run_menu(2, '5:8:16,15:18:1,30:33:16', [1], disabled=(0,))
+        self.run_menu(2, '5:8:16,15:18:8,30:33:16', [1], disabled=(0,))
+
+    def test_page_navigation_and_partial_last_page(self):
+        self.run_menu(12, '5:8:2,20:23:16', [10])
+        self.run_menu(12, '5:8:1,15:18:1,25:28:1,40:43:16', [0])
+
+    def test_case_insensitive_search_and_no_results(self):
+        games = [menu.Game(Path('Mario Deluxe.gbc'), 'MARIO DELUXE', 'GBC', True),
+                 menu.Game(Path('Tetris.gb'), 'TETRIS', 'GB', True),
+                 menu.Game(Path('Densha.gbc'), 'DENSHA', 'EXCEEDS ROM LIMIT', False)]
+        self.assertEqual(menu.filter_games(games, 'mArIo'), [games[0]])
+        self.assertEqual(menu.filter_games(games, 'DELUXE'), [games[0]])
+        self.assertEqual(menu.filter_games(games, '  '), games)
+        self.assertEqual(menu.filter_games(games, 'ZELDA'), [])
 
     def test_partial_and_corrupt_host_packets(self):
         decoder = Requests()

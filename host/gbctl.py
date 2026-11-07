@@ -154,6 +154,8 @@ def play(link, library=None):
     status_line = [""]
     poll_enabled = [True]
     home_button = None
+    query_var = None
+    search_controls = []
 
     def send(force=False):
         state = sum(1 << BTN[b] for b in held)
@@ -166,9 +168,11 @@ def play(link, library=None):
                         + ("\n\n" + status_line[0] if status_line[0] else ""))
         if home_button is not None:
             home_button.config(state="disabled" if uploading else "normal")
+        for widget in search_controls:
+            widget.config(state="normal" if library.active and library.can_control else "disabled")
 
     def down(e):
-        if library is not None and library.busy:
+        if isinstance(e.widget, tk.Entry) or library is not None and library.busy:
             return
         b = KEYS.get(e.keysym)
         if b:
@@ -178,6 +182,8 @@ def play(link, library=None):
             send()
 
     def up(e):
+        if isinstance(e.widget, tk.Entry):
+            return
         b = KEYS.get(e.keysym)
         if b:                                     # defer: auto-repeat sends release+press pairs
             def rel():
@@ -213,6 +219,7 @@ def play(link, library=None):
         root.update_idletasks()
         try:
             status_line[0] = library.home()
+            query_var.set(library.query)
             poll_enabled[0] = True
             send()
         except (OSError, RuntimeError, SystemExit) as error:
@@ -220,8 +227,38 @@ def play(link, library=None):
             status_line[0] = f"Launcher error: {error}\nF1 / Home can retry."
             lab.config(text=status_line[0])
 
+    def apply_search(event=None, clear=False):
+        if library.busy or not library.active:
+            return "break"
+        held.clear()
+        send(force=True)
+        if clear:
+            query_var.set("")
+        try:
+            status_line[0] = library.search(query_var.get())
+            query_var.set(library.query)
+            poll_enabled[0] = True
+            send()
+        except (OSError, RuntimeError, ValueError, SystemExit) as error:
+            status_line[0] = f"Search error: {error}"
+            lab.config(text=status_line[0])
+        root.focus_set()
+        return "break"
+
     if library is not None:
         root.title("FPGA Game Boy library")
+        query_var = tk.StringVar(value=library.query)
+        row = tk.Frame(root)
+        row.pack(before=lab, padx=12, pady=8, fill="x")
+        tk.Label(row, text="Search library:").pack(side="left")
+        entry = tk.Entry(row, textvariable=query_var, width=24, font=("Menlo", 12))
+        entry.pack(side="left", padx=6)
+        entry.bind("<Return>", apply_search)
+        search_button = tk.Button(row, text="Search", command=apply_search)
+        search_button.pack(side="left")
+        clear_button = tk.Button(row, text="Clear", command=lambda: apply_search(clear=True))
+        clear_button.pack(side="left")
+        search_controls.extend((entry, search_button, clear_button))
         root.after(50, run_poll)
         home_button = tk.Button(root, text="Home / refresh (F1, resets game)", command=go_home)
         home_button.pack(pady=8)

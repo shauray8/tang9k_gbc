@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
 from sm83asm import Asm
@@ -33,6 +34,9 @@ FONT = {
     '/':'01010204081010','-':'0000001F000000','.':'00000000000C0C',
     ':':'000C0C000C0C00','<':'01020408040201','>':'10080402040810',
     '?':'0E110102040004','(':'02040808080402',')':'08040202020408',
+    '!':'04040404040004',"'":'04040800000000','&':'0C12140C15120D',
+    '+':'0004041F040400',',':'00000000000408','_':'0000000000001F',
+    '[':'0E08080808080E',']':'0E02020202020E','#':'0A0A1F0A1F0A0A',
 }
 
 @dataclass(frozen=True)
@@ -68,6 +72,12 @@ def library(folder):
     if len(games) > 4064:
         raise ValueError('The current ROM address space supports at most 4064 menu records')
     return games
+
+
+def filter_games(games, query):
+    needle = ' '.join(query.casefold().split())
+    return [game for game in games if needle in ' '.join(
+        (game.title, game.path.stem, game.info)).casefold()]
 
 
 def rgb555(color):
@@ -140,8 +150,12 @@ def text(value, width=20):
     return bytes(ord(c)-32 if c in FONT or c == ' ' else ord('?')-32
                  for c in value.upper()[:width].ljust(width))
 
+def wrapped_text(value, width, lines):
+    parts = textwrap.wrap(value.upper(), width=width)[:lines]
+    return b''.join(text(part, width) for part in parts + ['']*(lines-len(parts)))
 
-def build(games, covers=None):
+
+def build(games, covers=None, query="", total=None):
     count = len(games)
     a = Asm(0x150)
     def call(label): a.call(label)
@@ -169,7 +183,7 @@ def build(games, covers=None):
     a.wr(0xFF4F, 0)
     a.w16(0x21, 0x2F00)
     a.wr(0xFF68, 0x80)
-    a.emit(0x06, 40)
+    a.emit(0x06, 56)
     l = a.label()
     a.emit(0x2A, 0xE0, 0x69, 0x05)
     a.jr(0x20, l)
@@ -182,26 +196,39 @@ def build(games, covers=None):
         a.emit(0xF0, 0x00, 0xE6, 15, 0x4F, 0x2F, 0x47, 0xF0, previous,
                0xA0, 0xE0, event, 0x79, 0xE0, previous)
     if count:
-        a.emit(0xF0, 0x96, 0xCB, 0x47)  # BIT 0,A: right
-        a.jp(0xCA, 'check_left')
+        a.emit(0xF0, 0x96, 0xCB, 0x5F)  # BIT 3,A: down selects next
+        a.jp(0xCA, 'check_up')
         load_selected()
         a.emit(0x23)
         a.w16(0x11, count)
         a.emit(0x7C, 0xBA)
-        a.jr(0x20, 'store_cursor')
+        a.jp(0xC2, 'store_cursor')
         a.emit(0x7D, 0xBB)
-        a.jr(0x20, 'store_cursor')
+        a.jp(0xC2, 'store_cursor')
         a.w16(0x21, 0)
         a.jp(0xC3, 'store_cursor')
-        a.label('check_left')
-        a.emit(0xF0, 0x96, 0xCB, 0x4F)
-        a.jp(0xCA, 'check_play')
+        a.label('check_up')
+        a.emit(0xF0, 0x96, 0xCB, 0x57)
+        a.jp(0xCA, 'check_pages')
         load_selected()
         a.emit(0x7C, 0xB5)
         a.jr(0x20, 'cursor_nonzero')
         a.w16(0x21, count)
         a.label('cursor_nonzero')
         a.emit(0x2B)
+        a.jp(0xC3, 'store_cursor')
+        a.label('check_pages')
+        a.emit(0xF0, 0x96, 0xE6, 3)
+        a.jp(0xCA, 'check_play')
+        load_selected()
+        call('record')
+        a.w16(0x01, 0x1F6)
+        a.emit(0x09, 0xF0, 0x96, 0xCB, 0x47)
+        a.jr(0x28, 'page_pointer')
+        a.emit(0x23, 0x23)
+        a.label('page_pointer')
+        a.emit(0x2A, 0x4F, 0x7E, 0x67, 0x69)
+        a.jp(0xC3, 'store_cursor')
         a.label('store_cursor')
         a.emit(0x7D, 0xE0, 0x90, 0x7C, 0xE0, 0x91)
         call('render')
@@ -226,6 +253,12 @@ def build(games, covers=None):
     a.emit(0xF0, 0x44, 0xFE, 144)
     a.jr(0x20, 'vblank')
     a.emit(0xC9)
+    a.label('next_vblank')
+    a.emit(0xF0, 0x40, 0xE6, 0x80, 0xC8)  # bootstrap renders with LCD off
+    l = a.label()
+    a.emit(0xF0, 0x44, 0xB7)
+    a.jr(0x20, l)
+    a.jp(0xC3, 'vblank')
     a.label('send')
     a.emit(0xF5, 0xE0, 1, 0x3E, 0x81, 0xE0, 2, 0xF1, 0xC9)
     a.label('record')
@@ -243,31 +276,67 @@ def build(games, covers=None):
            0xE6, 7, 0xB0, 0x3C)
     a.st(0x2000)
     a.emit(0x7D, 0xE6, 31, 0x87, 0xF6, 0x40, 0x67, 0x2E, 0, 0xC9)
-    a.label('text20')
-    for _ in range(20):
-        a.emit(0x2A, 0x12, 0x13)     # pre-encoded font tiles; no per-character conversion
-    a.emit(0xC9)
+    for width in (13, 20):
+        a.label(f'text{width}')
+        for _ in range(width):
+            a.emit(0x2A, 0x12, 0x13)
+        a.emit(0xC9)
     a.label('render')
-    for slot, destination in enumerate((0x8600, 0x8780, 0x8900)):
-        load_selected()
-        if slot:
-            a.w16(0x11, slot); a.emit(0x19)
+    load_selected()
+    call('record')
+    a.w16(0x01, 0x1D9)
+    a.emit(0x09, 0x2A, 0xE0, 0x98, 0x2A, 0xE0, 0x99, 0x7E, 0xE0, 0x9C)
+    # Redraw the list in one VBlank, then details in the next. This avoids
+    # mode-3 VRAM writes and LCD-off flashing, even across a ROM bank/page.
+    for row in range(5):
+        a.emit(0xF0, 0x98, 0x6F, 0xF0, 0x99, 0x67)
+        if row:
+            a.w16(0x11, row); a.emit(0x19)
         call('record')
-        a.emit(0x7C, 0xE0, 0x51, 0x7D, 0xE0, 0x52)
-        a.wr(0xFF53, destination >> 8)
-        a.wr(0xFF54, destination & 255)
-        a.wr(0xFF55, 23)
-        a.w16(0x01, 0x180); a.emit(0x09)
-        a.wr(0xFF68, 0x80 | (slot+1)*8)
-        a.emit(0x06, 8)
-        l = a.label()
-        a.emit(0x2A, 0xE0, 0x69, 0x05)
-        a.jr(0x20, l)
-        if slot == 0:
-            for destination in (0x9960, 0x99A0, 0x9A00):
-                a.w16(0x11, destination); call('text20')
-            a.emit(0x7E, 0xE0, 0x94)
-    a.emit(0xC9)
+        a.w16(0x01, 0x1D8)
+        a.emit(0x09, 0x2A, 0xE0, 0x9E, 0x23, 0x23, 0x23)
+        for line in range(2):
+            a.w16(0x11, 0x9801+(4+row*2+line)*32)
+            call('text13')
+        a.emit(0xF0, 0x9E, 0xB7)
+        disabled = f'row{row}_disabled'
+        palette_ready = f'row{row}_palette'
+        a.jr(0x28, disabled)
+        a.emit(0xAF)
+        a.jr(0x18, palette_ready)
+        a.label(disabled)
+        a.ld_a(6)
+        a.label(palette_ready)
+        if count:
+            a.emit(0x47, 0xF0, 0x9C, 0xFE, row, 0x78)
+            unselected = f'row{row}_unselected'
+            a.jr(0x20, unselected)
+            a.ld_a(4)
+            a.label(unselected)
+        a.emit(0x4F)
+        a.wr(0xFF4F, 1)
+        a.emit(0x79)
+        for line in range(2):
+            a.w16(0x11, 0x9800+(4+row*2+line)*32)
+            for _ in range(14):
+                a.emit(0x12, 0x13)
+        a.wr(0xFF4F, 0)
+    call('next_vblank')
+    load_selected()
+    call('record')
+    a.emit(0x7C, 0xE0, 0x51, 0x7D, 0xE0, 0x52)
+    a.wr(0xFF53, 0x86)
+    a.wr(0xFF54, 0)
+    a.wr(0xFF55, 23)
+    a.w16(0x01, 0x180); a.emit(0x09)
+    a.wr(0xFF68, 0x88)
+    a.emit(0x06, 8)
+    l = a.label()
+    a.emit(0x2A, 0xE0, 0x69, 0x05)
+    a.jr(0x20, l)
+    for destination in (0x99C0, 0x99E0, 0x9A00, 0x9A20):
+        a.w16(0x11, destination); call('text20')
+    a.emit(0x7E, 0xE0, 0x94, 0xC9)
     code = a.link()
     if 0x150 + len(code) > 0x2000:
         raise ValueError('Launcher code overlaps graphics')
@@ -297,36 +366,44 @@ def build(games, covers=None):
     image[0x2600:0x2660] = bytes(border)
     tilemap, attrs = bytearray(1024), bytearray(1024)
     tilemap[0:20] = text('TANG / LIBRARY')
-    tilemap[32:52] = text(f'MAC / {count} GAMES')
-    for slot, x in enumerate((1, 8, 15)):
-        for y in range(6):
-            for dx in range(4):
-                pos = (y+3)*32+x+dx
-                tilemap[pos] = 96+slot*24+y*4+dx
-                attrs[pos] = slot+1
+    tilemap[32:52] = text(f'{count}/{count if total is None else total} GAMES / MAC')
+    tilemap[64:84] = text('FIND: '+query if query else 'UP/DOWN SELECT')
+    for y in range(6):
+        for x in range(4):
+            tilemap[(y+4)*32+15+x] = 96+y*4+x
+            attrs[(y+4)*32+15+x] = 1
     for x in range(6):
-        tilemap[2*32+x] = 170 if x == 0 else 171 if x == 5 else 168
-        tilemap[9*32+x] = 172 if x == 0 else 173 if x == 5 else 169
-        attrs[2*32+x] = attrs[9*32+x] = 4
-    for y in range(3, 9):
-        # Vertical edges share the left/right corner's vertical stroke.
-        tilemap[y*32] = 174
-        tilemap[y*32+5] = 175
-        attrs[y*32] = attrs[y*32+5] = 4
+        tilemap[3*32+14+x] = 170 if x == 0 else 171 if x == 5 else 168
+        tilemap[10*32+14+x] = 172 if x == 0 else 173 if x == 5 else 169
+        attrs[3*32+14+x] = attrs[10*32+14+x] = 5
+    for y in range(4, 10):
+        tilemap[y*32+14] = 174
+        tilemap[y*32+19] = 175
+        attrs[y*32+14] = attrs[y*32+19] = 5
     # Two extra border tiles are loaded with the same initial GDMA burst.
     vertical = tile_bytes([[2 if x == 0 else 0 for x in range(8)] for _ in range(8)])
     vertical += tile_bytes([[2 if x == 7 else 0 for x in range(8)] for _ in range(8)])
     image[0x2660:0x2680] = vertical
     image[0x2700:0x2B00] = tilemap
     image[0x2B00:0x2F00] = attrs
-    palette = ['#101827', '#F2F5E9', '#62D9D0', '#7191AE']*5
-    image[0x2F00:0x2F28] = b''.join(rgb555(c).to_bytes(2, 'little') for c in palette)
-    blank = bytes(384) + bytes(8) + text('NO GAMES FOUND') + text('MAC LIBRARY') + text('ADD .GB / .GBC FILES') + bytes(1)
+    base = ['#101827', '#F2F5E9', '#62D9D0', '#7191AE']
+    palette = base*4 + ['#62D9D0', '#101827', '#62D9D0', '#101827'] + base
+    palette += ['#101827', '#64788A', '#62D9D0', '#64788A']
+    image[0x2F00:0x2F38] = b''.join(rgb555(c).to_bytes(2, 'little') for c in palette)
+    blank = bytes(392) + wrapped_text('NO MATCHES' if query else 'NO GAMES FOUND', 20, 2)
+    blank += text('TRY ANOTHER SEARCH' if query else 'ADD GB OR GBC FILES') + text('SEARCH ON THE MAC')
+    blank += bytes(4) + text('', 26) + bytes(4)
     image[0x2F40:0x2F40+len(blank)] = blank
+    last_page = (max(count, 1)-1)//5*5
     for i, game in enumerate(games):
-        record = cover(game, covers) + text(game.title) + text(game.info)
-        record += text('A PLAY   <> BROWSE' if game.playable else 'NOT SUPPORTED YET')
-        record += bytes((int(game.playable),))
+        page, row = i//5*5, i%5
+        previous = page-5 if page else last_page
+        following = page+5 if page+5 < count else 0
+        record = cover(game, covers) + wrapped_text(game.title, 20, 2) + text(game.info)
+        record += text('Z PLAY  <> PAGE' if game.playable else 'NOT SUPPORTED YET')
+        record += bytes((int(game.playable),)) + page.to_bytes(2, 'little') + bytes((row,))
+        record += wrapped_text(game.title, 13, 2)
+        record += previous.to_bytes(2, 'little') + following.to_bytes(2, 'little')
         offset = 0x4000+i*512
         image[offset:offset+len(record)] = record
     image[0x14D] = -sum(image[0x134:0x14D])-25 & 255
