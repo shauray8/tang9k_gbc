@@ -17,6 +17,10 @@ sticky day carry and halt/resume with an accelerated oscillator, not altered reg
 """
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'host'))
+from sm83asm import Asm as RomAsm
 
 DMA_ROUTINE = [0xE0, 0x46,   # LDH (46),A    start OAM DMA from A<<8
                0x3E, 0x30,   # LD A,48       48 x 4 M-cycles > 160
@@ -25,69 +29,10 @@ DMA_ROUTINE = [0xE0, 0x46,   # LDH (46),A    start OAM DMA from A<<8
                0xC9]         # RET
 
 
-class Asm:
+class Asm(RomAsm):
     def __init__(self, org):
-        self.org = org
-        self.b = bytearray()
-        self.labels = {}
-        self.fix = []
+        super().__init__(org)
         self.checks = []
-        self.n = 0
-
-    def pc(self):
-        return self.org + len(self.b)
-
-    def emit(self, *bs):
-        self.b += bytes(bs)
-
-    def label(self, name=None):
-        if name is None:
-            self.n += 1
-            name = f'.L{self.n}'
-        self.labels[name] = self.pc()
-        return name
-
-    def w16(self, op, v):
-        self.emit(op, v & 0xFF, v >> 8)
-
-    def jp(self, op, lab):           # JP/CALL family with absolute target
-        self.emit(op, 0, 0)
-        self.fix.append((len(self.b) - 2, lab, 'abs'))
-
-    def jr(self, op, lab):           # JR family with relative target
-        self.emit(op, 0)
-        self.fix.append((len(self.b) - 1, lab, 'rel'))
-
-    def link(self):
-        for off, lab, kind in self.fix:
-            t = self.labels[lab]
-            if kind == 'abs':
-                self.b[off], self.b[off + 1] = t & 0xFF, t >> 8
-            else:
-                r = t - (self.org + off + 1)
-                assert -128 <= r < 128, lab
-                self.b[off] = r & 0xFF
-        return bytes(self.b)
-
-    # ---- instructions / macros ----
-    def ld_a(self, v):
-        self.emit(0x3E, v)
-
-    def st(self, addr):              # (addr) <- A
-        if addr >= 0xFF00:
-            self.emit(0xE0, addr & 0xFF)
-        else:
-            self.w16(0xEA, addr)
-
-    def ldm(self, addr):             # A <- (addr)
-        if addr >= 0xFF00:
-            self.emit(0xF0, addr & 0xFF)
-        else:
-            self.w16(0xFA, addr)
-
-    def wr(self, addr, v):
-        self.ld_a(v)
-        self.st(addr)
 
     def _check(self, v, desc):
         self.emit(0xFE, v)           # CP v
@@ -103,9 +48,6 @@ class Asm:
     def chk_c(self, v, desc):
         self.emit(0x1C, 0x79)        # INC E; LD A,C
         self._check(v, desc)
-
-    def call(self, lab):
-        self.jp(0xCD, lab)
 
     def fill(self, addr, n, v):
         self.w16(0x21, addr)         # LD HL,addr

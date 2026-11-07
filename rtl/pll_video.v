@@ -5,6 +5,8 @@ module pll_video (
     output clock_out,
     output locked
 );
+    // Keep the serializer PLL on the dedicated route to the right-hand /5 divider.
+    (* BEL = "X46Y9/PLL" *)
     rPLL #(
         .FCLKIN("27"),
         .IDIV_SEL(3),

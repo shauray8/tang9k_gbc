@@ -34,6 +34,7 @@ module top (
     pll_psram #(.FREQ(162_000_000)) pll_mem (.clock_in(clk27), .clock_out(mclk), .clock_sys(clk_sys), .locked(mlock));
     wire clk_ser, vlock, clk_pix;   // 371.25 MHz serializer; 74.25 MHz video = clk_ser / 5
     pll_video pll_vid (.clock_in(clk27), .clock_out(clk_ser), .locked(vlock));
+    (* BEL = "X46Y28/CLKDIV_HCLK1_SECT0" *)
     CLKDIV #(.DIV_MODE("5")) cdiv (.HCLKIN(clk_ser), .RESETN(vlock), .CALIB(1'b0), .CLKOUT(clk_pix));
 
     reg [7:0] por = 0;
@@ -116,6 +117,15 @@ module top (
     wire locked_v, waitlock;
     wire ld_m_req; wire [21:0] ld_m_addr; wire [7:0] ld_m_wd;
     wire u_start = u_v && us == S_CMD && u_d == "L";
+    wire core_ser_valid, menu_pending;
+    wire [7:0] core_ser_data;
+    wire [15:0] menu_index;
+    wire menu_arm = u_v && us == S_CMD && u_d == "M" && tq == 0 && !cap_busy;
+    menu_bridge menu_requests (
+        .clk(clk_sys), .rst(rst || btn_sync[15]), .arm(menu_arm), .disarm(u_start || fl_start),
+        .ser_valid(core_ser_valid), .ser_data(core_ser_data),
+        .take(tq_s == 5 && tq == 1 && tx_rdy), .pending(menu_pending), .index(menu_index)
+    );
     wire [1:0] cart_type; wire [8:0] rom_mask; wire [3:0] ram_mask; wire [7:0] lsum;
     wire cgb_mode, cart_rtc, cart_ram;
     always @(posedge clk_sys) begin
@@ -125,10 +135,12 @@ module top (
             idle <= u_v ? 22'd0 : (idle[21] ? idle : idle + 1);
             if (idle[21] && us != S_CMD) us <= S_CMD;          // ~78 ms gap aborts 'J'/'L'/'V'
             if (us == S_ROM && ld_done) begin us <= S_CMD; tq <= 2; tq_s <= 0; end
+            if (menu_pending && tq == 0 && !cap_busy && !u_v) begin tq <= 4; tq_s <= 5; end
             if (u_v) case (us)
                 S_CMD: if (u_d == "J") us <= S_JOY;
                        else if (u_d == "L") us <= S_ROM;
-                       else if (cap_busy) ;
+                       else if (cap_busy || tq != 0) ;
+                       else if (u_d == "M") begin tq <= 2; tq_s <= 6; end
                        else if (u_d == "S") begin tq <= 4; tq_s <= 1; end
                        else if (u_d == "D") begin tq <= 9; tq_s <= 2; end
                        else if (u_d == "H") begin tq <= 3; tq_s <= 3; end
@@ -166,6 +178,12 @@ module top (
         7'b100_0011: tx_d = scanout_reply[23:16];
         7'b100_0010: tx_d = scanout_reply[15:8];
         7'b100_0001: tx_d = scanout_reply[7:0];
+        7'b101_0100: tx_d = "G";
+        7'b101_0011: tx_d = menu_index[7:0];
+        7'b101_0010: tx_d = menu_index[15:8];
+        7'b101_0001: tx_d = menu_index[7:0] ^ menu_index[15:8] ^ 8'h5A;
+        7'b110_0010: tx_d = "M";
+        7'b110_0001: tx_d = 8'h01; // launcher protocol version
         default: tx_d = pc[15:8];
     endcase
     uart_tx #(.DIV(234)) utx (.clk(clk_sys), .rst(rst), .tx(uart_tx), .ready(tx_rdy),
@@ -211,7 +229,7 @@ module top (
         .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
         .rom_mask(rom_mask), .ram_mask(ram_mask),
         .ext_addr(g_addr), .ext_req(g_req), .ext_we(g_we), .ext_wd(g_wd), .ext_rd(b_rd),
-        .ser_valid(), .ser_data(), .pc_dbg(pc)
+        .ser_valid(core_ser_valid), .ser_data(core_ser_data), .pc_dbg(pc)
     );
     wire v_issue = vst == 3'd1 || vst == 3'd3;
     assign b_req  = !test_done ? test_req : !test_pass ? 1'b0 : !ld_done ? ld_m_req : v_issue ? 1'b1 : vst == 3'd5 ? g_req : 1'b0;

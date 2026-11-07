@@ -100,26 +100,50 @@ class Link:
         self.L.libusb_exit(self.ctx)
 
 
-def load(link, path):
-    rom = open(path, "rb").read()
+class UploadCancelled(RuntimeError):
+    pass
+
+
+def load(link, path, progress=None, cancelled=None):
+    with open(path, "rb") as source:
+        rom = source.read()
     size = 32768 << rom[0x148] if len(rom) > 0x148 and rom[0x148] <= 7 else len(rom)
     if size > 0x3E0000:
         sys.exit(f"{size} bytes: larger than the 3.875 MB PSRAM ROM area")
-    rom = rom[:size].ljust(size, b"\xff")             # FPGA stops after the header-declared size
-    want = sum(rom) & 0xFF
+    rom = rom[:size].ljust(size, b"\xff")
+    expected = b"K" + bytes([sum(rom) & 0xFF])
+
+    def check_cancelled():
+        if cancelled is not None and cancelled():
+            raise UploadCancelled("Upload cancelled")
+
     for attempt in range(1, 4):
-        t = time.time()
-        link.write(b"L" + rom)
-        reply = link.read(0.5)            # also lets the FPGA's 80 ms idle timeout abort a partial load
-        k = reply.find(b"K")
-        if k >= 0 and k + 1 < len(reply) and reply[k + 1] == want:
-            print(f"loaded {path} ({size // 1024} KB) in {time.time() - t:.1f}s, checksum {want:02x} verified")
+        check_cancelled()
+        started = time.monotonic()
+        if progress is not None:
+            progress(0, size, attempt, "sending")
+        link.write(b"L")
+        for offset in range(0, size, 4096):
+            check_cancelled()
+            block = rom[offset:offset+4096]
+            link.write(block)
+            if progress is not None:
+                progress(offset+len(block), size, attempt, "sending")
+        if progress is not None:
+            progress(size, size, attempt, "verifying")
+        # USB completion means queued in the bridge, not drained over UART.
+        # Its trailing bytes can take longer than the former 0.5 s ack window.
+        reply = link.read(2.0, lambda data: expected in data)
+        check_cancelled()
+        if expected in reply:
+            print(f"loaded {path} ({size // 1024} KB) in {time.monotonic()-started:.1f}s, "
+                  f"checksum {expected[1]:02x} verified", flush=True)
             return
-        print(f"attempt {attempt}: no valid ack (got {reply!r}), retrying")
+        print(f"attempt {attempt}: no valid ack (got {reply!r}), retrying", flush=True)
     sys.exit("upload failed 3 times; is the Game Boy design on the board (make flash)?")
 
 
-def play(link):
+def play(link, library=None):
     import tkinter as tk
     held, pending = set(), {}
     root = tk.Tk()
@@ -127,16 +151,25 @@ def play(link):
     lab = tk.Label(root, font=("Menlo", 14), justify="left", padx=16, pady=12)
     lab.pack()
     last = [-1]
+    status_line = [""]
+    poll_enabled = [True]
+    home_button = None
 
     def send(force=False):
         state = sum(1 << BTN[b] for b in held)
-        if force or state != last[0]:
+        uploading = library is not None and library.busy
+        if (library is None or library.can_control) and (force or state != last[0]):
             link.write(bytes([ord("J"), state]))
             last[0] = state
         lab.config(text="arrows=D-pad  Z=A  X=B  Enter=Start  Backspace=Select\n\nheld: "
-                        + (" ".join(sorted(held)) or "-"))
+                        + (" ".join(sorted(held)) or "-")
+                        + ("\n\n" + status_line[0] if status_line[0] else ""))
+        if home_button is not None:
+            home_button.config(state="disabled" if uploading else "normal")
 
     def down(e):
+        if library is not None and library.busy:
+            return
         b = KEYS.get(e.keysym)
         if b:
             if b in pending:                      # auto-repeat: cancel the queued release
@@ -155,6 +188,45 @@ def play(link):
         send(force=True)
         root.after(250, keepalive)
 
+    def run_poll():
+        if poll_enabled[0]:
+            try:
+                message = library.poll()
+                if library.busy:
+                    held.clear()
+                if message is not None:
+                    status_line[0] = message
+                    send()
+            except (OSError, RuntimeError, SystemExit) as error:
+                poll_enabled[0] = False
+                status_line[0] = f"Launcher error: {error}\nF1 / Home can reload the library."
+                lab.config(text=status_line[0])
+        root.after(50, run_poll)
+
+    def go_home(event=None):
+        if library.busy:
+            return
+        held.clear()
+        send(force=True)
+        status_line[0] = "Loading library..."
+        send()
+        root.update_idletasks()
+        try:
+            status_line[0] = library.home()
+            poll_enabled[0] = True
+            send()
+        except (OSError, RuntimeError, SystemExit) as error:
+            poll_enabled[0] = False
+            status_line[0] = f"Launcher error: {error}\nF1 / Home can retry."
+            lab.config(text=status_line[0])
+
+    if library is not None:
+        root.title("FPGA Game Boy library")
+        root.after(50, run_poll)
+        home_button = tk.Button(root, text="Home / refresh (F1, resets game)", command=go_home)
+        home_button.pack(pady=8)
+        root.bind("<F1>", go_home)
+
     root.bind("<KeyPress>", down)
     root.bind("<KeyRelease>", up)
     root.bind("<FocusOut>", lambda e: (held.clear(), send()))
@@ -162,6 +234,8 @@ def play(link):
     try:
         root.mainloop()
     finally:
+        if library is not None:
+            library.close()
         link.write(b"J\x00")
 
 
