@@ -1,6 +1,6 @@
 // Powered-session MBC3 clock. Runs from the system oscillator, not CPU/PPU enables.
-// Live registers and the software-latched snapshot are separate. Save/restore and
-// elapsed time across power-off belong to the cartridge-save path, not this clock.
+// Live registers and the software-latched snapshot are separate. The host saves and
+// restores the live registers ({sec, min, hour, day-low, day-high}) between sessions.
 module mbc3_rtc #(
     parameter integer CLOCK_HZ = 27000000
 ) (
@@ -10,7 +10,10 @@ module mbc3_rtc #(
     input data_wr,
     input [3:0] select,
     input [7:0] din,
-    output reg [7:0] dout
+    output reg [7:0] dout,
+    input host_load,
+    input [39:0] host_d,
+    output [39:0] live
 );
     localparam integer DIV_BITS = CLOCK_HZ > 1 ? $clog2(CLOCK_HZ) : 1;
     reg [DIV_BITS-1:0] fraction;
@@ -22,6 +25,8 @@ module mbc3_rtc #(
     reg [4:0] snap_hours;
     reg [8:0] snap_days;
     reg snap_halt, snap_carry;
+    assign live = {2'b0, seconds, 2'b0, minutes, 3'b0, hours, days[7:0],
+                   carry, halt, 5'b0, days[8]};
 
     always @(*) case (select)
         4'h8: dout = {2'b0, snap_seconds};
@@ -75,6 +80,11 @@ module mbc3_rtc #(
                     snap_seconds <= seconds; snap_minutes <= minutes; snap_hours <= hours;
                     snap_days <= days; snap_halt <= halt; snap_carry <= carry;
                 end
+            end
+            if (host_load) begin
+                fraction <= 0;
+                seconds <= host_d[37:32]; minutes <= host_d[29:24]; hours <= host_d[20:16];
+                days <= {host_d[0], host_d[15:8]}; halt <= host_d[6]; carry <= host_d[7];
             end
         end
     end

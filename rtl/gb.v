@@ -27,6 +27,10 @@ module gb (
     output            ext_we,
     output     [7:0]  ext_wd,
     input      [7:0]  ext_rd,
+    input             bus_resume,       // host released a freeze: reissue the held bus access
+    input             rtc_host_load,
+    input      [39:0] rtc_host_d,
+    output     [39:0] rtc_live,
     // serial debug
     output reg        ser_valid,
     output reg [7:0]  ser_data,
@@ -154,14 +158,15 @@ module gb (
         .clk(clk), .rst(rst || !cart_rtc),
         .latch_wr(wr_now && mbc3 && cart_rtc && a[15:13] == 3'b011),
         .data_wr(wr_now && !cpu_blk && rtc_sel), .select(ram_bank),
-        .din(cpu_dout), .dout(rtc_q)
+        .din(cpu_dout), .dout(rtc_q),
+        .host_load(rtc_host_load), .host_d(rtc_host_d), .live(rtc_live)
     );
     assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} : {5'b11111, rbank, ma[12:0]};
     reg cyc_start;                // also set right after reset: the first opcode fetch (0100) needs a request
     always @(posedge clk) cyc_start <= ce || rst || hdma_release;
     assign ext_req = !rst && (rom_sel || cram_sel) &&
-                     (hdma_owns ? (hdma_start || hdma_req) :
-                      cyc_start && !(cpu_wr && !dma_act && rom_sel));
+                     (hdma_owns ? (hdma_start || hdma_req || bus_resume) :
+                      (cyc_start || bus_resume) && !(cpu_wr && !dma_act && rom_sel));
     assign ext_we = !hdma_owns && cpu_wr && !dma_act && cram_sel;
     assign ext_wd = cpu_dout;
 
