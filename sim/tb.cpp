@@ -43,6 +43,9 @@ int main(int argc, char **argv) {
     int frames = 0;
     long long ticks = 0, max_ticks = (long long)max_frames * 70224;
     long acc = 0;
+    // GB_MEM_LATENCY: system clocks from request to read data (hardware PSRAM ~10).
+    const int latency = getenv("GB_MEM_LATENCY") ? atoi(getenv("GB_MEM_LATENCY")) : 0;
+    int read_due = 0; unsigned read_data = 0xFF;
     while (ticks < max_ticks) {
         // Same fractional enable as the 27 MHz system domain.
         g->clk_en_fast = acc >= 154776 && acc < 225000;
@@ -52,7 +55,12 @@ int main(int argc, char **argv) {
         g->clk = 0; g->eval();
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
         g->clk = 1; g->eval();
-        if (req) { if (we) ext[addr] = wd; else g->ext_rd = ext[addr]; }
+        if (read_due > 0 && --read_due == 0) g->ext_rd = read_data;
+        if (req) {
+            if (we) ext[addr] = wd;
+            else if (latency) { read_data = ext[addr]; read_due = latency; }
+            else g->ext_rd = ext[addr];
+        }
         if (g->pix_we && g->pix_y < 144 && g->pix_x < 160)
             fb[g->pix_y][g->pix_x] = g->cgb_mode ? g->pix_rgb : g->pix;
         if (g->vsync) {
