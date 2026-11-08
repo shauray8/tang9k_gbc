@@ -5,7 +5,8 @@ The macOS serial driver for this bridge rejects configuration and can wedge the 
 talks to the bridge's UART endpoints directly over libusb (bundled with the toolchain).
 
   gbctl.py load game.gb    upload a .gb image to PSRAM (up to 3.875 MiB; lost on reset),
-                           checksum-verified; ~11 s per 128 KB at 115200 baud
+                           checksum-verified; ~11 s per 128 KB at 115200 baud. The launcher
+                           (host/launcher.py) also restores and stores battery saves.
   gbctl.py status          print core/loader state (PSRAM ready, load progress, LCD, lock)
   gbctl.py diagnose        print boot-memory address, expected/actual bytes, and controller state
   gbctl.py scanout         read the completed HDMI game-window fingerprint and frame counter
@@ -142,6 +143,68 @@ def load(link, path, progress=None, cancelled=None):
         print(f"attempt {attempt}: no valid ack (got {reply!r}), retrying", flush=True)
     sys.exit("upload failed 3 times; is the Game Boy design on the board (make flash)?")
 
+class TransferError(RuntimeError):
+    pass
+
+
+def core_pause(link, state):
+    """state 1 freezes, 0 resumes, 2 queries -> (frozen, dirty cart RAM since the last freeze)."""
+    for _ in range(3):
+        link.read(0.02)
+        link.write(bytes((ord("P"), state)))
+        reply = link.read(0.5, lambda d: len(d) >= 2 and d[-2:-1] == b"p")
+        k = reply.rfind(b"p")
+        if k >= 0 and k + 1 < len(reply):
+            flags = reply[k + 1]
+            return bool(flags & 1), bool(flags & 2)
+    raise TransferError("no reply to freeze/resume; is the save-capable design loaded?")
+
+
+def _header(op, addr, n):
+    return bytes((ord(op), addr >> 16 & 0x3F, addr >> 8 & 0xFF, addr & 0xFF, n >> 8 & 0xFF, n & 0xFF))
+
+
+def read_memory(link, addr, size):
+    """Read PSRAM bytes from a frozen core (64 KiB per command, 8-bit sum checked)."""
+    out = bytearray()
+    while len(out) < size:
+        n = min(size - len(out), 0x10000)
+        link.read(0.02)
+        link.write(_header("A", addr + len(out), n))
+        data = link.read(n / 9000 + 1.5, lambda d: len(d) >= n + 1)
+        if len(data) != n + 1 or sum(data[:n]) & 0xFF != data[n]:
+            raise TransferError(f"memory read failed at {addr + len(out):06x} ({len(data)}/{n + 1} bytes)")
+        out += data[:n]
+    return bytes(out)
+
+
+def write_memory(link, addr, data):
+    for offset in range(0, len(data), 0x10000):
+        block = data[offset:offset + 0x10000]
+        link.read(0.02)
+        link.write(_header("B", addr + offset, len(block)) + block)
+        expected = b"b" + bytes((sum(block) & 0xFF,))
+        reply = link.read(len(block) / 9000 + 1.5, lambda d: expected in d)
+        if expected not in reply:
+            raise TransferError(f"memory write failed at {addr + offset:06x} (got {reply!r})")
+
+
+def read_clock(link):
+    link.read(0.02)
+    link.write(b"T")
+    reply = link.read(0.5, lambda d: len(d) >= 6)
+    if len(reply) != 6 or reply[:1] != b"T":
+        raise TransferError(f"clock read failed (got {reply!r})")
+    return tuple(reply[1:])
+
+
+def write_clock(link, clock):
+    link.read(0.02)
+    link.write(b"U" + bytes(clock))
+    if link.read(0.5, lambda d: b"u" in d)[-1:] != b"u":
+        raise TransferError("clock write failed")
+
+
 
 def play(link, library=None):
     import tkinter as tk
@@ -260,7 +323,7 @@ def play(link, library=None):
         clear_button.pack(side="left")
         search_controls.extend((entry, search_button, clear_button))
         root.after(50, run_poll)
-        home_button = tk.Button(root, text="Home / refresh (F1, resets game)", command=go_home)
+        home_button = tk.Button(root, text="Home (F1): save game, return to library", command=go_home)
         home_button.pack(pady=8)
         root.bind("<F1>", go_home)
 
