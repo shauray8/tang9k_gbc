@@ -8,11 +8,17 @@ out="$root/build/banktest"
 mkdir -p "$out"
 iverilog -g2012 -s tb_rtc -o "$out/rtc.vvp" "$root/rtl/mbc3_rtc.v" "$here/tb_rtc.v"
 vvp "$out/rtc.vvp"
+iverilog -g2012 -s tb_host_mem -o "$out/host_mem.vvp" "$root/rtl/host_mem.v" "$here/tb_host_mem.v"
+vvp -n "$out/host_mem.vvp"
 python3 "$here/mkrom.py" "$out"
 verilator --cc --exe --build -O3 -j 0 -Wno-fatal -Wno-WIDTH -Wno-CASEINCOMPLETE \
   --top-module gb -Mdir "$out/obj" \
   "$root"/rtl/sm83.v "$root"/rtl/timer.v "$root"/rtl/ppu.v "$root"/rtl/mbc3_rtc.v "$root"/rtl/gb.v "$here/tb.cpp" >/dev/null
 rc=0
 for r in bank_dmg bank_cgb bank_cgb_fast vram_dma_cgb vram_dma_cgb_fast mbc3_rtc mbc3_no_rtc mbc3_timer_only; do "$out/obj/Vgb" "$out/$r.gb" || rc=1; done
+# Host save transfers freeze and resume the core mid-instruction, DMA and cart-RAM access.
+for r in bank_dmg bank_cgb bank_cgb_fast vram_dma_cgb vram_dma_cgb_fast mbc3_no_rtc; do
+  GB_FREEZE_PERIOD=9973 "$out/obj/Vgb" "$out/$r.gb" || rc=1
+done
 "$out/obj/Vgb" "$out/speed_cgb.gb" --wake-stop || rc=1
 exit $rc
