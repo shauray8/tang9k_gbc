@@ -33,9 +33,9 @@ class MenuTests(unittest.TestCase):
             rom.write_bytes(menu.build(games))
             env = os.environ.copy()
             env['GB_PRESS'] = presses
-            r = subprocess.run([str(ROOT / 'build/obj/Vgb'), str(rom), '65',
+            r = subprocess.run([str(ROOT / 'build/obj/Vgb'), str(rom), '200',
                                 str(Path(temporary) / 'screen.ppm')], env=env,
-                               capture_output=True, timeout=40, check=True)
+                               capture_output=True, timeout=120, check=True)
             packets = re.findall(rb'\xA5(.)(.)(.)', r.stdout, re.S)
             selections = []
             for lo, hi, check in packets:
@@ -43,25 +43,27 @@ class MenuTests(unittest.TestCase):
                 selections.append(lo[0] | hi[0] << 8)
             self.assertEqual(selections, expected)
 
+    # GB_PRESS masks: 1 right, 2 left, 4 up, 16 A, 32 B, 128 start. The player starts in
+    # front of the middle cabinet; walking off an edge enters the next/previous room.
+    def test_launch_cabinet_in_front_of_player(self):
+        self.run_menu(3, '30:33:16', [1])
+
+    def test_walk_to_another_cabinet(self):
+        self.run_menu(3, '30:90:1,100:103:16', [2])
+
+    def test_run_into_next_room(self):
+        self.run_menu(6, '30:80:33,100:103:128', [3])
+
+    def test_wrap_to_last_room_above_255_and_banks(self):
+        self.run_menu(261, '30:100:2,110:113:16', [260])
+        self.run_menu(36, '30:100:2,110:113:16', [35])
+
+    def test_disabled_and_empty_cabinets_do_not_launch(self):
+        self.run_menu(2, '30:33:16,50:100:2,110:113:16', [0], disabled=(1,))
+        self.run_menu(1, '30:33:16,50:100:2,110:113:16', [0])
+
     def test_empty_library_cannot_launch(self):
-        self.run_menu(0, '5:8:16,15:18:1,25:28:128', [])
-
-    def test_single_game_wraps(self):
-        self.run_menu(1, '5:8:4,20:23:16', [0])
-
-    def test_bank_boundary_selection(self):
-        self.run_menu(34, '5:8:4,20:23:16', [33])
-
-    def test_index_above_255_and_wrap_back(self):
-        self.run_menu(260, '5:8:4,20:23:16', [259])
-        self.run_menu(260, '5:8:4,12:15:8,25:28:16', [0])
-
-    def test_disabled_card_does_not_launch_but_navigation_continues(self):
-        self.run_menu(2, '5:8:16,15:18:8,30:33:16', [1], disabled=(0,))
-
-    def test_page_navigation_and_partial_last_page(self):
-        self.run_menu(12, '5:8:2,20:23:16', [10])
-        self.run_menu(12, '5:8:1,15:18:1,25:28:1,40:43:16', [0])
+        self.run_menu(0, '30:33:16,40:90:2,100:103:128', [])
 
     def test_case_insensitive_search_and_no_results(self):
         games = [menu.Game(Path('Mario Deluxe.gbc'), 'MARIO DELUXE', 'GBC', True),

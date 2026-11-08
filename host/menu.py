@@ -15,7 +15,6 @@ import re
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
-from sm83asm import Asm
 
 # Five-by-seven pixel font; each hex digit pair is one five-bit row.
 FONT = {
@@ -155,258 +154,224 @@ def wrapped_text(value, width, lines):
     return b''.join(text(part, width) for part in parts + ['']*(lines-len(parts)))
 
 
+# ---------------- arcade hall (host/arcade/engine.asm) ----------------
+ENGINE = ROOT / 'host/arcade/engine.bin'
+FONT_TILES, SPRITE_TILES, BG_MAP, BG_ATTR = 0x2000, 0x2A00, 0x2C00, 0x2E00
+WIN_MAP, WIN_ATTR, BG_PALS, OBJ_PALS = 0x3000, 0x3080, 0x3100, 0x3140
+MARQUEE_PALS, IDLE_TEXT, LOAD_TEXT, BLANK_RECORD = 0x3180, 0x31A0, 0x3200, 0x3400
+GAME_COUNT, LAST_ROOM = 0x3FF0, 0x3FF2
+WORLD, COVER_TILE = 96, 160
+
+HALL = ['#120F24', '#2D2357', '#6C5BB8', '#F7D774']      # bg, wall, cabinet, lights
+TEXT = ['#120F24', '#F2F5E9', '#62D9D0', '#7191AE']
+MARQUEE_DIM = ['#3A2E6B', '#B9A9F0', '#3A2E6B', '#3A2E6B']
+MARQUEE_LIT = ['#F7D774', '#2A1B4F', '#F7D774', '#F7D774']
+PLAYER = ['#000000', '#F7C59F', '#3FA7D6', '#1A1A2E']    # colour 0 transparent
+COIN = ['#000000', '#F7D774', '#C08A2E', '#FFFFFF']
+
+# 8x8 world tiles, '0'-'3' = palette colours of HALL
+WORLD_TILES = {
+    'blank': ['00000000'] * 8,
+    'wall': ['11111111', '11111111', '11101111', '11111111',
+             '11111111', '11111111', '11111110', '11111111'],
+    'light': ['11111111', '00010000', '00010000', '00333000',
+              '03333300', '00333000', '00000000', '00000000'],
+    'floor_a': ['22222221', '22222211', '22222111', '22221111',
+                '22211111', '22111111', '21111111', '11111111'],
+    'floor_b': ['11111112', '11111122', '11111222', '11112222',
+                '11122222', '11222222', '12222222', '22222222'],
+    'cab_tl': ['00333333', '03222222', '32222222', '32200000',
+               '32200000', '32200000', '32200000', '32222222'],
+    'cab_tr': ['33333300', '22222230', '22222223', '00000223',
+               '00000223', '00000223', '00000223', '22222223'],
+    'cab_l': ['32222222', '32222222', '32200000', '32200000',
+              '32200000', '32200000', '32222222', '32222222'],
+    'cab_r': ['22222223', '22222223', '00000223', '00000223',
+              '00000223', '00000223', '22222223', '22222223'],
+    'panel_l': ['32222222', '32333333', '32322222', '32322222',
+                '32322222', '32322222', '32333333', '32222222'],
+    'stick': ['22222222', '33333333', '22233222', '22333322',
+              '22233222', '22213222', '33333333', '22222222'],
+    'buttons': ['22222222', '33333333', '22222222', '23322332',
+                '23322332', '22222222', '33333333', '22222222'],
+    'panel': ['22222222', '33333333', '22222222', '22222222',
+              '22222222', '22222222', '33333333', '22222222'],
+    'panel_r': ['22222223', '33333323', '22222323', '22222323',
+                '22222323', '22222323', '33333323', '22222223'],
+    'base_l': ['32222222', '32222222', '32222222', '32222222',
+               '32222222', '32222222', '32222222', '11111111'],
+    'base': ['22222222', '22222222', '22222222', '22222222',
+             '22222222', '22222222', '22222222', '11111111'],
+    'slot': ['22222222', '22000022', '22033022', '22000022',
+             '22222222', '22222222', '22222222', '11111111'],
+    'base_r': ['22222223', '22222223', '22222223', '22222223',
+               '22222223', '22222223', '22222223', '11111111'],
+    'edge': ['00000000', '00000000', '11111111', '11111111',
+             '11111111', '11111111', '11111111', '11111111'],
+}
+TILE = {name: WORLD + i for i, name in enumerate(WORLD_TILES)}
+
+# 16x16 player frames: stand, walk 1, walk 2, jump ('.' transparent, s skin, b shirt, d dark)
+PLAYER_FRAMES = [
+    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
+     '...dssdssdss....', '...dsssssss.....', '....dsssss......', '.....ddddd......',
+     '....dbbbbbd.....', '...dbbbbbbbd....', '...sdbbbbbds....', '...sdbbbbbds....',
+     '....ddddddd.....', '....dd...dd.....', '....dd...dd.....', '...ddd...ddd....'],
+    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
+     '...dssdssdss....', '...dsssssss.....', '....dsssss......', '.....ddddd......',
+     '....dbbbbbd.....', '...dbbbbbbbds...', '..sdbbbbbbd.....', '....dbbbbbd.....',
+     '....ddddddd.....', '...dd....dd.....', '..dd......dd....', '..dd.......dd...'],
+    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
+     '...dssdssdss....', '...dsssssss.....', '....dsssss......', '.....ddddd......',
+     '....dbbbbbd.....', '..sdbbbbbbbd....', '....dbbbbbbds...', '....dbbbbbd.....',
+     '....ddddddd.....', '.....dd.dd......', '.....dd.dd......', '....ddd.ddd.....'],
+    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
+     '...dssdssdss....', '..sdsssssss.s...', '..s.dsssss..s...', '.....ddddd......',
+     '....dbbbbbd.....', '...dbbbbbbbd....', '...dbbbbbbbd....', '....ddddddd.....',
+     '...dd.....dd....', '..dd.......dd...', '................', '................'],
+]
+COIN_FRAMES = [
+    ['..1111..', '.122221.', '12233221', '12232221', '12232221', '12233221', '.122221.', '..1111..'],
+    ['...11...', '...12...', '...12...', '...13...', '...13...', '...12...', '...12...', '...11...'],
+]
+
+
+def _pixels(rows, legend):
+    return [[legend[c] for c in row] for row in rows]
+
+
+def sprite_tiles():
+    """8x16 OBJ mode: each 16x16 frame is a left and right column of two tiles."""
+    out = bytearray()
+    legend = {'.': 0, 's': 1, 'b': 2, 'd': 3}
+    for frame in PLAYER_FRAMES:
+        px = _pixels(frame, legend)
+        for half in (0, 8):
+            out += tile_bytes([row[half:half+8] for row in px])
+    for frame in COIN_FRAMES:
+        out += tile_bytes(_pixels(frame, {'.': 0, '1': 1, '2': 2, '3': 3}))
+        out += bytes(16)
+    return bytes(out).ljust(24*16, b'\0')
+
+
+def palettes(*sets):
+    return b''.join(rgb555(c).to_bytes(2, 'little') for p in sets for c in p)
+
+
+def marquee(title):
+    words = [w for w in re.split(r'[^A-Z0-9]+', title.upper()) if w]
+    letters = ''.join(w[0] for w in words) if len(words) > 1 else (words[0] if words else '?')
+    return text(letters[:4].center(4), 4)
+
+
+def grey(record_palette):
+    out = bytearray()
+    for i in range(0, 8, 2):
+        c = int.from_bytes(record_palette[i:i+2], 'little')
+        y = ((c & 31)*3 + (c >> 5 & 31)*6 + (c >> 10 & 31)) // 10 // 2 + 4
+        out += (y | y << 5 | y << 10).to_bytes(2, 'little')
+    return bytes(out)
+
+
+def record(game, covers):
+    art = cover(game, covers)
+    tiles, pal = art[:384], art[384:392]
+    hint = 'A: INSERT COIN' if game.playable else 'OUT OF ORDER'
+    return (tiles + (pal if game.playable else grey(pal)) + wrapped_text(game.title, 20, 2)
+            + text(game.info) + text(hint) + bytes((int(game.playable),)) + marquee(game.title))
+
+
+def blank_record():
+    pixels = [[0]*32 for _ in range(48)]
+    for y in range(48):
+        for x in range(32):
+            if (x + y) % 6 == 0:
+                pixels[y][x] = 1
+    for y, row in enumerate(bytes.fromhex(FONT['?'])):
+        for x in range(5):
+            if row & (16 >> x):
+                for dy in range(2):
+                    for dx in range(2):
+                        pixels[17+2*y+dy][11+2*x+dx] = 3
+    return (tile_bytes(pixels) + palettes(['#0B0A16', '#1E1A33', '#2D2357', '#4B3F7A'])
+            + wrapped_text('EMPTY CABINET', 20, 2) + text('') + text('ADD MORE GAMES')
+            + bytes((0,)) + text('----', 4))
+
+
+def hall_maps():
+    bg, attr = bytearray(32*14), bytearray(32*14)
+    def put(row, col, tile, pal=0):
+        bg[row*32+col], attr[row*32+col] = tile, pal
+    for col in range(32):
+        put(1, col, TILE['light'] if col % 3 == 1 else TILE['blank'])
+        for row in range(2, 11):
+            put(row, col, TILE['wall'])
+        put(11, col, TILE['edge'])
+        put(12, col, TILE['floor_a' if col % 2 else 'floor_b'])
+        put(13, col, TILE['floor_b' if col % 2 else 'floor_a'])
+    for k in range(3):
+        c = 7*k
+        put(2, c, TILE['cab_tl'])
+        put(2, c+5, TILE['cab_tr'])
+        for i in range(4):
+            put(2, c+1+i, 0, 5+k)                   # marquee text, filled per room
+        for r in range(6):
+            put(3+r, c, TILE['cab_l'])
+            put(3+r, c+5, TILE['cab_r'])
+            for i in range(4):
+                put(3+r, c+1+i, COVER_TILE + 24*k + r*4 + i, 1+k)
+        for i, name in enumerate(('panel_l', 'stick', 'buttons', 'panel', 'panel', 'panel_r')):
+            put(9, c+i, TILE[name])
+        for i, name in enumerate(('base_l', 'base', 'slot', 'base', 'base', 'base_r')):
+            put(10, c+i, TILE[name])
+    return bg, attr
+
+
+def banner(lines):
+    return b''.join(text(line) for line in (lines + ['']*4)[:4])
+
+
 def build(games, covers=None, query="", total=None):
+    """Arcade-hall launcher ROM: the engine plus graphics and one record per game."""
     count = len(games)
-    a = Asm(0x150)
-    def call(label): a.call(label)
-    def load_selected():
-        a.emit(0xF0, 0x90, 0x6F, 0xF0, 0x91, 0x67)
-    def dma(source, destination, blocks):
-        for reg, value in ((0x51, source >> 8), (0x52, source & 255),
-                           (0x53, destination >> 8), (0x54, destination & 255), (0x55, blocks-1)):
-            a.wr(0xFF00+reg, value)
-    a.emit(0xF3)
-    a.w16(0x31, 0xFFFE)
-    a.wr(0xFFFF, 0)
-    a.wr(0xFF40, 0)
-    a.wr(0xFF00, 0x30)
-    a.wr(0xFF4D, 1)
-    a.emit(0x10, 0)
-    for reg, value in ((0x90, 0), (0x91, 0), (0x92, 15), (0x93, 15), (0x94, 0)):
-        a.wr(0xFF00+reg, value)
-    a.wr(0xFF4F, 0)
-    dma(0x2000, 0x8000, 96)
-    dma(0x2600, 0x8A80, 8)
-    dma(0x2700, 0x9800, 64)
-    a.wr(0xFF4F, 1)
-    dma(0x2B00, 0x9800, 64)
-    a.wr(0xFF4F, 0)
-    a.w16(0x21, 0x2F00)
-    a.wr(0xFF68, 0x80)
-    a.emit(0x06, 56)
-    l = a.label()
-    a.emit(0x2A, 0xE0, 0x69, 0x05)
-    a.jr(0x20, l)
-    call('render')
-    a.wr(0xFF40, 0x91)
-    a.label('main')
-    call('vblank')
-    for select, previous, event in ((0x20, 0x92, 0x96), (0x10, 0x93, 0x95)):
-        a.wr(0xFF00, select)
-        a.emit(0xF0, 0x00, 0xE6, 15, 0x4F, 0x2F, 0x47, 0xF0, previous,
-               0xA0, 0xE0, event, 0x79, 0xE0, previous)
-    if count:
-        a.emit(0xF0, 0x96, 0xCB, 0x5F)  # BIT 3,A: down selects next
-        a.jp(0xCA, 'check_up')
-        load_selected()
-        a.emit(0x23)
-        a.w16(0x11, count)
-        a.emit(0x7C, 0xBA)
-        a.jp(0xC2, 'store_cursor')
-        a.emit(0x7D, 0xBB)
-        a.jp(0xC2, 'store_cursor')
-        a.w16(0x21, 0)
-        a.jp(0xC3, 'store_cursor')
-        a.label('check_up')
-        a.emit(0xF0, 0x96, 0xCB, 0x57)
-        a.jp(0xCA, 'check_pages')
-        load_selected()
-        a.emit(0x7C, 0xB5)
-        a.jr(0x20, 'cursor_nonzero')
-        a.w16(0x21, count)
-        a.label('cursor_nonzero')
-        a.emit(0x2B)
-        a.jp(0xC3, 'store_cursor')
-        a.label('check_pages')
-        a.emit(0xF0, 0x96, 0xE6, 3)
-        a.jp(0xCA, 'check_play')
-        load_selected()
-        call('record')
-        a.w16(0x01, 0x1F6)
-        a.emit(0x09, 0xF0, 0x96, 0xCB, 0x47)
-        a.jr(0x28, 'page_pointer')
-        a.emit(0x23, 0x23)
-        a.label('page_pointer')
-        a.emit(0x2A, 0x4F, 0x7E, 0x67, 0x69)
-        a.jp(0xC3, 'store_cursor')
-        a.label('store_cursor')
-        a.emit(0x7D, 0xE0, 0x90, 0x7C, 0xE0, 0x91)
-        call('render')
-        a.label('check_play')
-        a.emit(0xF0, 0x95, 0xE6, 9)
-        a.jp(0xCA, 'frame_end')
-        a.emit(0xF0, 0x94, 0xB7)
-        a.jp(0xCA, 'frame_end')
-        a.ld_a(0xA5); call('send')
-        a.emit(0xF0, 0x90); call('send')
-        a.emit(0xF0, 0x91); call('send')
-        a.emit(0x47, 0xF0, 0x90, 0xA8, 0xEE, 0x5A); call('send')
-        a.label('loading')
-        a.emit(0x76)
-        a.jr(0x18, 'loading')
-    a.label('frame_end')
-    l = a.label()
-    a.emit(0xF0, 0x44, 0xB7)
-    a.jr(0x20, l)
-    a.jp(0xC3, 'main')
-    a.label('vblank')
-    a.emit(0xF0, 0x44, 0xFE, 144)
-    a.jr(0x20, 'vblank')
-    a.emit(0xC9)
-    a.label('next_vblank')
-    a.emit(0xF0, 0x40, 0xE6, 0x80, 0xC8)  # bootstrap renders with LCD off
-    l = a.label()
-    a.emit(0xF0, 0x44, 0xB7)
-    a.jr(0x20, l)
-    a.jp(0xC3, 'vblank')
-    a.label('send')
-    a.emit(0xF5, 0xE0, 1, 0x3E, 0x81, 0xE0, 2, 0xF1, 0xC9)
-    a.label('record')
-    a.w16(0x11, count)
-    a.emit(0x7C, 0xBA)
-    a.jr(0x38, 'record_valid')
-    a.jr(0x20, 'record_blank')
-    a.emit(0x7D, 0xBB)
-    a.jr(0x38, 'record_valid')
-    a.label('record_blank')
-    a.w16(0x21, 0x2F40)
-    a.emit(0xC9)
-    a.label('record_valid')
-    a.emit(0x7C, 0x07, 0x07, 0x07, 0x47, 0x7D, 0x07, 0x07, 0x07,
-           0xE6, 7, 0xB0, 0x3C)
-    a.st(0x2000)
-    a.emit(0x7D, 0xE6, 31, 0x87, 0xF6, 0x40, 0x67, 0x2E, 0, 0xC9)
-    for width in (13, 20):
-        a.label(f'text{width}')
-        for _ in range(width):
-            a.emit(0x2A, 0x12, 0x13)
-        a.emit(0xC9)
-    a.label('render')
-    load_selected()
-    call('record')
-    a.w16(0x01, 0x1D9)
-    a.emit(0x09, 0x2A, 0xE0, 0x98, 0x2A, 0xE0, 0x99, 0x7E, 0xE0, 0x9C)
-    # Redraw the list in one VBlank, then details in the next. This avoids
-    # mode-3 VRAM writes and LCD-off flashing, even across a ROM bank/page.
-    for row in range(5):
-        a.emit(0xF0, 0x98, 0x6F, 0xF0, 0x99, 0x67)
-        if row:
-            a.w16(0x11, row); a.emit(0x19)
-        call('record')
-        a.w16(0x01, 0x1D8)
-        a.emit(0x09, 0x2A, 0xE0, 0x9E, 0x23, 0x23, 0x23)
-        for line in range(2):
-            a.w16(0x11, 0x9801+(4+row*2+line)*32)
-            call('text13')
-        a.emit(0xF0, 0x9E, 0xB7)
-        disabled = f'row{row}_disabled'
-        palette_ready = f'row{row}_palette'
-        a.jr(0x28, disabled)
-        a.emit(0xAF)
-        a.jr(0x18, palette_ready)
-        a.label(disabled)
-        a.ld_a(6)
-        a.label(palette_ready)
-        if count:
-            a.emit(0x47, 0xF0, 0x9C, 0xFE, row, 0x78)
-            unselected = f'row{row}_unselected'
-            a.jr(0x20, unselected)
-            a.ld_a(4)
-            a.label(unselected)
-        a.emit(0x4F)
-        a.wr(0xFF4F, 1)
-        a.emit(0x79)
-        for line in range(2):
-            a.w16(0x11, 0x9800+(4+row*2+line)*32)
-            for _ in range(14):
-                a.emit(0x12, 0x13)
-        a.wr(0xFF4F, 0)
-    call('next_vblank')
-    load_selected()
-    call('record')
-    a.emit(0x7C, 0xE0, 0x51, 0x7D, 0xE0, 0x52)
-    a.wr(0xFF53, 0x86)
-    a.wr(0xFF54, 0)
-    a.wr(0xFF55, 23)
-    a.w16(0x01, 0x180); a.emit(0x09)
-    a.wr(0xFF68, 0x88)
-    a.emit(0x06, 8)
-    l = a.label()
-    a.emit(0x2A, 0xE0, 0x69, 0x05)
-    a.jr(0x20, l)
-    for destination in (0x99C0, 0x99E0, 0x9A00, 0x9A20):
-        a.w16(0x11, destination); call('text20')
-    a.emit(0x7E, 0xE0, 0x94, 0xC9)
-    code = a.link()
-    if 0x150 + len(code) > 0x2000:
-        raise ValueError('Launcher code overlaps graphics')
+    total = count if total is None else total
     banks = 1 + math.ceil(count/32)
     size = max(0x8000, 1 << (banks*0x4000-1).bit_length())
     image = bytearray(size)
-    image[0x100:0x104] = bytes((0, 0xC3, 0x50, 1))
-    image[0x134:0x143] = b'TANG LIBRARY'.ljust(15, b'\0')
+    image[:0x2000] = ENGINE.read_bytes()[:0x2000]
+    image[0x134:0x143] = b'TANG ARCADE'.ljust(15, b'\0')
     image[0x143] = 0x80
-    image[0x147] = 0x19              # MBC5, no RAM
+    image[0x147] = 0x19                                  # MBC5, no RAM
     image[0x148] = size.bit_length()-16
-    image[0x150:0x150+len(code)] = code
     font = []
     for ch in range(32, 128):
         rows = bytes.fromhex(FONT.get(chr(ch), '00000000000000'))
         font.extend(b for row in (*rows, 0) for b in (row << 1, 0))
-    image[0x2000:0x2600] = bytes(font)
-    border = []
-    for kind in range(6):
-        pixels = [[0]*8 for _ in range(8)]
-        for y in range(8):
-            for x in range(8):
-                if (kind in (0, 2, 3) and y == 0 or kind in (1, 4, 5) and y == 7 or
-                    kind in (2, 4) and x == 0 or kind in (3, 5) and x == 7):
-                    pixels[y][x] = 2
-        border.extend(tile_bytes(pixels))
-    image[0x2600:0x2660] = bytes(border)
-    tilemap, attrs = bytearray(1024), bytearray(1024)
-    tilemap[0:20] = text('TANG / LIBRARY')
-    tilemap[32:52] = text(f'{count}/{count if total is None else total} GAMES / MAC')
-    tilemap[64:84] = text('FIND: '+query if query else 'UP/DOWN SELECT')
-    for y in range(6):
-        for x in range(4):
-            tilemap[(y+4)*32+15+x] = 96+y*4+x
-            attrs[(y+4)*32+15+x] = 1
-    for x in range(6):
-        tilemap[3*32+14+x] = 170 if x == 0 else 171 if x == 5 else 168
-        tilemap[10*32+14+x] = 172 if x == 0 else 173 if x == 5 else 169
-        attrs[3*32+14+x] = attrs[10*32+14+x] = 5
-    for y in range(4, 10):
-        tilemap[y*32+14] = 174
-        tilemap[y*32+19] = 175
-        attrs[y*32+14] = attrs[y*32+19] = 5
-    # Two extra border tiles are loaded with the same initial GDMA burst.
-    vertical = tile_bytes([[2 if x == 0 else 0 for x in range(8)] for _ in range(8)])
-    vertical += tile_bytes([[2 if x == 7 else 0 for x in range(8)] for _ in range(8)])
-    image[0x2660:0x2680] = vertical
-    image[0x2700:0x2B00] = tilemap
-    image[0x2B00:0x2F00] = attrs
-    base = ['#101827', '#F2F5E9', '#62D9D0', '#7191AE']
-    palette = base*4 + ['#62D9D0', '#101827', '#62D9D0', '#101827'] + base
-    palette += ['#101827', '#64788A', '#62D9D0', '#64788A']
-    image[0x2F00:0x2F38] = b''.join(rgb555(c).to_bytes(2, 'little') for c in palette)
-    blank = bytes(392) + wrapped_text('NO MATCHES' if query else 'NO GAMES FOUND', 20, 2)
-    blank += text('TRY ANOTHER SEARCH' if query else 'ADD GB OR GBC FILES') + text('SEARCH ON THE MAC')
-    blank += bytes(4) + text('', 26) + bytes(4)
-    image[0x2F40:0x2F40+len(blank)] = blank
-    last_page = (max(count, 1)-1)//5*5
+    world = b''.join(tile_bytes(_pixels(t, {c: int(c) for c in '0123'})) for t in WORLD_TILES.values())
+    image[FONT_TILES:FONT_TILES+0xA00] = (bytes(font) + world).ljust(0xA00, b'\0')
+    image[SPRITE_TILES:SPRITE_TILES+24*16] = sprite_tiles()
+    bg, attr = hall_maps()
+    heading = f'FIND:{query} {count}/{total}' if query else f'TANG ARCADE {count} GAMES'
+    bg[0:20], attr[0:20] = text(heading), bytes((4,))*20
+    image[BG_MAP:BG_MAP+len(bg)], image[BG_ATTR:BG_ATTR+len(attr)] = bg, attr
+    image[WIN_MAP:WIN_MAP+128], image[WIN_ATTR:WIN_ATTR+128] = bytes(128), bytes((4,))*128
+    image[BG_PALS:BG_PALS+64] = palettes(HALL, HALL, HALL, HALL, TEXT,
+                                         MARQUEE_DIM, MARQUEE_DIM, MARQUEE_DIM)
+    image[OBJ_PALS:OBJ_PALS+16] = palettes(PLAYER, COIN)
+    image[MARQUEE_PALS:MARQUEE_PALS+16] = palettes(MARQUEE_DIM, MARQUEE_LIT)
+    image[IDLE_TEXT:IDLE_TEXT+80] = banner(
+        ['NO MATCHES' if query and not count else 'WALK TO A CABINET',
+         '<> WALK  B RUN', 'UP JUMP', 'A OR START: PLAY'])
+    image[LOAD_TEXT:LOAD_TEXT+80] = banner(['COIN INSERTED!', 'LOADING GAME...', '', 'HANG TIGHT'])
+    blank = blank_record()
+    image[BLANK_RECORD:BLANK_RECORD+len(blank)] = blank
+    image[GAME_COUNT:GAME_COUNT+2] = count.to_bytes(2, 'little')
+    image[LAST_ROOM:LAST_ROOM+2] = ((max(count, 1)-1)//3*3).to_bytes(2, 'little')
     for i, game in enumerate(games):
-        page, row = i//5*5, i%5
-        previous = page-5 if page else last_page
-        following = page+5 if page+5 < count else 0
-        record = cover(game, covers) + wrapped_text(game.title, 20, 2) + text(game.info)
-        record += text('Z PLAY  <> PAGE' if game.playable else 'NOT SUPPORTED YET')
-        record += bytes((int(game.playable),)) + page.to_bytes(2, 'little') + bytes((row,))
-        record += wrapped_text(game.title, 13, 2)
-        record += previous.to_bytes(2, 'little') + following.to_bytes(2, 'little')
-        offset = 0x4000+i*512
-        image[offset:offset+len(record)] = record
+        data = record(game, covers)
+        offset = 0x4000*(1 + i//32) + (i % 32)*512
+        image[offset:offset+len(data)] = data
     image[0x14D] = -sum(image[0x134:0x14D])-25 & 255
-    checksum = sum(image) & 65535
+    checksum = (sum(image) - image[0x14E] - image[0x14F]) & 65535
     image[0x14E:0x150] = checksum.to_bytes(2, 'big')
     return bytes(image)
