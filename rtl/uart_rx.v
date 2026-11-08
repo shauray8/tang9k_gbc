@@ -1,6 +1,7 @@
-// 8N1 UART receiver. DIV = clk / baud.
-module uart_rx #(parameter DIV = 219) (
+// 8N1 UART receiver. div = clk / baud, selectable at run time.
+module uart_rx (
     input            clk,
+    input      [8:0] div,
     input            rx,
     output reg       valid,
     output reg [7:0] data
@@ -14,10 +15,10 @@ module uart_rx #(parameter DIV = 219) (
         sync <= {sync[0], rx};
         valid <= 0;
         if (!busy) begin
-            if (!sync[1]) begin busy <= 1; cnt <= DIV / 2; bitn <= 0; end
+            if (!sync[1]) begin busy <= 1; cnt <= div >> 1; bitn <= 0; end
         end else if (cnt != 0) cnt <= cnt - 1;
         else begin
-            cnt <= DIV - 1;
+            cnt <= div - 1'b1;
             bitn <= bitn + 1;
             if (bitn == 0) begin if (sync[1]) busy <= 0; end      // false start
             else if (bitn <= 8) sh <= {sync[1], sh[7:1]};

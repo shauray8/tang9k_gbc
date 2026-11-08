@@ -98,9 +98,17 @@ module top (
     // 'F' = post-scaler fingerprint. Replies are serialized through one queue.
     // 'P' <0|1|2>: resume / freeze / query the core -> 'p' <{dirty cart RAM, frozen}>.
     // A/B/T/U (cartridge RAM and MBC3 clock transfer, frozen core only): see rtl/host_mem.v.
+    // 'Q' <div>: switch both UART directions to 27 MHz / div once the reply queue drains.
+    // A new rate stays on probation until an 'S' arrives at it; ~1.2 s without one falls
+    // back to 115200 (div 234), so a rate the USB bridge cannot carry never strands the host.
     wire u_v; wire [7:0] u_d;
-    uart_rx #(.DIV(234)) urx (.clk(clk_sys), .rx(uart_rx), .valid(u_v), .data(u_d));
-    localparam S_CMD = 3'd0, S_JOY = 3'd1, S_ROM = 3'd2, S_PAUSE = 3'd4;
+    reg [8:0] udiv;
+    reg [7:0] udiv_next;
+    reg baud_switch, probation;
+    reg [24:0] probation_cnt;
+    wire tx_idle;
+    uart_rx urx (.clk(clk_sys), .div(udiv), .rx(uart_rx), .valid(u_v), .data(u_d));
+    localparam S_CMD = 3'd0, S_JOY = 3'd1, S_ROM = 3'd2, S_BAUD = 3'd3, S_PAUSE = 3'd4;
     reg [2:0] us;
     reg [7:0] ubtn;
     reg [21:0] idle;
@@ -138,7 +146,8 @@ module top (
     wire [21:0] hm_addr; wire [39:0] rtc_d, rtc_live;
     always @(posedge clk_sys) begin
         if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0;
-                       freeze <= 0; resume_cnt <= 0; dirty <= 0; end
+                       freeze <= 0; resume_cnt <= 0; dirty <= 0;
+                       udiv <= 9'd234; baud_switch <= 0; probation <= 0; end
         else begin
             if (tq != 0 && tx_rdy) tq <= tq - 1;
             idle <= u_v ? 22'd0 : (idle[21] ? idle : idle + 1);
@@ -148,19 +157,32 @@ module top (
             if (g_req && g_we && vst == 3'd5) dirty <= 1;
             if (u_start) dirty <= 0;
             if (menu_pending && tq == 0 && !u_v) begin tq <= 4; tq_s <= 5; end
+            if (baud_switch && tx_idle && tq == 0) begin
+                udiv <= {1'b0, udiv_next}; baud_switch <= 0;
+                probation <= udiv_next != 8'd234; probation_cnt <= 0;
+            end
+            if (probation) begin
+                probation_cnt <= probation_cnt + 1'b1;
+                if (&probation_cnt) begin udiv <= 9'd234; probation <= 0; end
+            end
             if (u_v && !hm_busy) case (us)
                 S_CMD: if (u_d == "J") us <= S_JOY;
                        else if (u_d == "L") us <= S_ROM;
                        else if (tq != 0) ;
                        else if (u_d == "P") us <= S_PAUSE;
+                       else if (u_d == "Q") us <= S_BAUD;
                        else if (u_d == "M") begin tq <= 2; tq_s <= 6; end
-                       else if (u_d == "S") begin tq <= 4; tq_s <= 1; end
+                       else if (u_d == "S") begin tq <= 4; tq_s <= 1; probation <= 0; end
                        else if (u_d == "D") begin tq <= 9; tq_s <= 2; end
                        else if (u_d == "H") begin tq <= 3; tq_s <= 3; end
                        else if (u_d == "F") begin
                            tq <= 4; tq_s <= 4; scanout_reply <= {scanout_frame, scanout_sig};
                        end
                 S_JOY: begin ubtn <= u_d; us <= S_CMD; end
+                S_BAUD: begin
+                    us <= S_CMD;
+                    if (u_d >= 8'd8) begin udiv_next <= u_d; baud_switch <= 1; end
+                end
                 S_PAUSE: begin
                     us <= S_CMD; tq <= 2; tq_s <= 7;
                     if (u_d == 8'd1 && !freeze) begin freeze <= 1; dirty <= 0; end
@@ -203,8 +225,8 @@ module top (
         7'b111_0001: tx_d = {6'd0, dirty, freeze};
         default: tx_d = pc[15:8];
     endcase
-    uart_tx #(.DIV(234)) utx (.clk(clk_sys), .rst(rst), .tx(uart_tx), .ready(tx_rdy),
-                              .we(tq != 0 || hm_tx_we), .wd(tq != 0 ? tx_d : hm_tx_d));
+    uart_tx utx (.clk(clk_sys), .rst(rst), .div(udiv), .tx(uart_tx), .ready(tx_rdy), .idle(tx_idle),
+                 .we(tq != 0 || hm_tx_we), .wd(tq != 0 ? tx_d : hm_tx_d));
 
     host_mem host_port (
         .clk(clk_sys), .rst(rst), .allow(freeze && resume_cnt == 0 && vst == 3'd5),

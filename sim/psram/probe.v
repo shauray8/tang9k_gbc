@@ -94,7 +94,7 @@ module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0, MEM_MHZ = 81, STR
             if (ts[2] != ts[1]) tc <= tc + 1'b1;
         end
     end
-    uart_rx #(.DIV(234)) rx (.clk(clk27), .rx(uart_rx), .valid(u_v), .data(u_d));
+    uart_rx rx (.clk(clk27), .div(9'd234), .rx(uart_rx), .valid(u_v), .data(u_d));
     reg [3:0] left;
     reg word_reply;
     always @(posedge clk27) begin
@@ -123,5 +123,5 @@ module psram_probe #(parameter FAST = 0, BRIDGE = 0, SYNC = 0, MEM_MHZ = 81, STR
         2: tx_d = actual;
         default: tx_d = cycles;
     endcase
-    uart_tx #(.DIV(234)) tx (.clk(clk27), .rst(rst), .we(left != 0), .wd(tx_d), .tx(uart_tx));
+    uart_tx tx (.clk(clk27), .rst(rst), .div(9'd234), .we(left != 0), .wd(tx_d), .ready(), .idle(), .tx(uart_tx));
 endmodule
