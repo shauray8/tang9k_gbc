@@ -22,7 +22,7 @@ module sm83 (
     reg [7:0] A, F, B, C, D, E, H, L, IR, Z, W;
     reg [15:0] SP, PC;
     reg [2:0] mc;
-    reg IME, ime_delay, halt, intm;
+    reg IME, ime_delay, halt, intm, haltbug;
     reg [4:0] IF, IE;
 
     assign halted = halt;
@@ -147,7 +147,7 @@ module sm83 (
             D = cgb_mode ? 8'hFF : 8'h00; E = cgb_mode ? 8'h56 : 8'hD8;
             H = cgb_mode ? 8'h00 : 8'h01; L = cgb_mode ? 8'h0D : 8'h4D;
             SP = 16'hFFFE; PC = 16'h0100; IR = 0; Z = 0; W = 0; // post-boot-ROM state
-            mc = 0; IME = 0; ime_delay = 0; halt = 0; intm = 0; IF = 0; IE = 0;
+            mc = 0; IME = 0; ime_delay = 0; halt = 0; intm = 0; haltbug = 0; IF = 0; IE = 0;
             addr <= 16'h0100; wr <= 0; rd <= 1; dout <= 0;
         end else begin
             if (ce) begin
@@ -187,7 +187,8 @@ module sm83 (
                 end else begin
                     if (mc == 0) begin
                         if (ime_delay) begin IME = 1; ime_delay = 0; end
-                        IR = d; PC = PC + 1;
+                        // HALT bug: the byte after HALT is fetched twice (PC does not advance).
+                        IR = d; if (haltbug) haltbug = 0; else PC = PC + 1;
                     end
                     op = IR;
                     // Select operands before execution, so immediate and register/memory
@@ -305,7 +306,8 @@ module sm83 (
                     8'h3F: begin F = {fZ, 1'b0, 1'b0, !fC, 4'b0}; fetch; end
                     // ---------------- 0x40-0x7F ----------------
                     8'h76: begin
-                        if (pend == 0 || IME) halt = 1; // (halt bug not emulated)
+                        if (pend == 0 || IME) halt = 1;
+                        else haltbug = 1;   // IME=0 with a pending interrupt: no halt, PC stalls once
                         fetch;
                     end
                     8'b01??????: begin
