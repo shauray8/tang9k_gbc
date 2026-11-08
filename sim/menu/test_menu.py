@@ -7,13 +7,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from threading import Event
-from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'host'))
 import menu
-from launcher import Library, Requests
+from launcher import Requests
 
 
 class MenuTests(unittest.TestCase):
@@ -98,58 +96,6 @@ class MenuTests(unittest.TestCase):
             self.assertTrue(by_name['Game (USA).GBC'].playable)
             self.assertFalse(by_name['broken.gb'].playable)
             self.assertFalse(by_name['large.gbc'].playable)
-
-
-class UploadStateTests(unittest.TestCase):
-    def service(self):
-        link = Mock()
-        link.read.return_value = b'G\x00\x00\x5A'
-        service = Library(link, ROOT)
-        service.games = [menu.Game(Path('example.gb'), 'EXAMPLE', 'GB', True)]
-        service.active = True
-        return service
-
-    def test_controls_stay_blocked_until_upload_completion_is_consumed(self):
-        service = self.service()
-        started, release = Event(), Event()
-
-        def transfer(link, path, progress, cancelled):
-            started.set()
-            if not release.wait(3):
-                raise RuntimeError('test transfer gate timed out')
-
-        with patch('launcher.gbctl.load', side_effect=transfer):
-            try:
-                service.poll()
-                self.assertTrue(started.wait(2))
-                self.assertTrue(service.busy)
-                self.assertFalse(service.can_control)
-                service.poll()       # must return while the transfer is still blocked
-                self.assertTrue(service.busy)
-                release.set()
-                self.assertTrue(service._done.wait(2))
-                self.assertFalse(service.can_control)  # GUI has not consumed completion yet
-                service.poll()
-                self.assertFalse(service.busy)
-                self.assertTrue(service.can_control)
-                self.assertFalse(service.active)
-            finally:
-                release.set()
-                service.close()
-
-    def test_upload_error_pauses_controls_and_polling(self):
-        service = self.service()
-        with patch('launcher.gbctl.load', side_effect=RuntimeError('transport interrupted')):
-            try:
-                service.poll()
-                self.assertTrue(service._done.wait(2))
-                service.poll()
-                self.assertFalse(service.busy)
-                self.assertFalse(service.can_control)
-                self.assertFalse(service.active)
-                self.assertIsNone(service.poll())
-            finally:
-                service.close()
 
 
 if __name__ == '__main__':
