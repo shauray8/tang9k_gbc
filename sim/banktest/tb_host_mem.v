@@ -61,10 +61,13 @@ module tb_host_mem;
         for (i = 0; i < 300; i = i + 1)
             if (mem[22'h3E0010 + i] != ((i * 7 + 3) & 255)) $fatal(1, "write data %0d", i);
         if (mem[22'h3E000F] != 0 || mem[22'h3E013C] != 0) $fatal(1, "write overran bounds");
-        // read them back under backpressure
+        // read them back under backpressure, with the UART idle timeout asserted throughout:
+        // a read receives no host bytes, so the timeout must not cut it short
         n_out = 0;
         send("A"); send(8'h3E); send(8'h00); send(8'h10); send(8'h01); send(8'h2C);
+        abort = 1;
         wait_idle;
+        abort = 0;
         if (n_out != 301) $fatal(1, "read length %0d", n_out);
         for (i = 0; i < 300; i = i + 1) if (out[i] != ((i * 7 + 3) & 255)) $fatal(1, "read data %0d", i);
         if (out[300] != s) $fatal(1, "read checksum");

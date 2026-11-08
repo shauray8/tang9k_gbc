@@ -6,7 +6,8 @@
 //   'B' a2 a1 a0 nh nl <n bytes> : write -> 'b' <8-bit sum>
 //   'T'                : -> 'T' sec min hour day-low day-high (live MBC3 clock)
 //   'U' sec min hour day-low day-high : load the live MBC3 clock -> 'u'
-// Commands arriving while not allowed are ignored; an idle UART gap aborts a partial command.
+// Commands arriving while not allowed are ignored. An idle UART gap aborts only states
+// that wait for host bytes (header, write data); reads stream out with no input at all.
 module host_mem (
     input             clk,
     input             rst,
@@ -62,7 +63,7 @@ module host_mem (
 
     always @(posedge clk) begin
         rtc_load <= 0;
-        if (rst || (abort && st != IDLE && st != TAG && st != PAYLOAD)) begin
+        if (rst || (abort && (st == HDR || st == WR))) begin
             st <= IDLE; slot_v <= 0;
         end else case (st)
             IDLE: if (in_v && cmd_ok && allow) case (in_d)

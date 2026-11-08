@@ -14,7 +14,7 @@ RTL += rtl/menu_bridge.v rtl/host_mem.v
 CST    := boards/tangnano9k/tangnano9k.cst
 SDC    := boards/tangnano9k/tangnano9k.sdc
 DEVICE := GW1NR-LV9QN88PC6/I5
-PNR_SEED ?= 5
+PNR_SEED ?= 3
 FAMILY := GW1N-9C
 
 .PHONY: all bitstream prog flash rom sim clean arcade
