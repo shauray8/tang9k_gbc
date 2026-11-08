@@ -25,6 +25,9 @@ BTN = {"right": 0, "left": 1, "up": 2, "down": 3, "a": 4, "b": 5, "select": 6, "
 KEYS = {"Right": "right", "Left": "left", "Up": "up", "Down": "down", "z": "a", "Z": "a",
         "x": "b", "X": "b", "Return": "start", "BackSpace": "select", "Shift_L": "select",
         "Shift_R": "select"}
+# UART rates: (27 MHz / baud divisor on the FPGA, FTDI divisor value, baud). Tried fastest first.
+SLOW = (234, 0x001A, 115_200)
+FAST = ((9, 0, 3_000_000), (18, 2, 1_500_000), (27, 3, 1_000_000), (54, 6, 500_000))
 
 
 class Link:
@@ -54,14 +57,75 @@ class Link:
             sys.exit(f"cannot claim UART interface: {L.libusb_error_name(r).decode()}")
         # Initialize the UART explicitly after USB reconnect: 115200 baud,
         # 8N1, no flow control. These are FTDI vendor requests, not termios.
-        for request, value in ((3, 0x001a), (4, 8), (2, 0)):
+        for request, value in ((3, SLOW[1]), (4, 8), (2, 0)):
             r = L.libusb_control_transfer(self.h, 0x40, request, value, CH, None, 0, 1000)
             if r < 0:
                 self.close()
                 sys.exit(f"UART setup failed: {L.libusb_error_name(r).decode()}")
+        self.baud = SLOW[2]
         # Send a harmless released-buttons packet to warm up the bridge.
         self.write(b"J\x00J\x00")
         self.read(0.1)
+        if os.environ.get("GB_BAUD") != "slow":
+            self.negotiate()
+
+    def _set_host_rate(self, ftdi, baud):
+        # The board's BL702 firmware applies a new rate only with the next 8N1 line-format
+        # request, so both are sent.
+        for request, value in ((3, ftdi), (4, 8)):
+            r = self.L.libusb_control_transfer(self.h, 0x40, request, value, CH, None, 0, 1000)
+            if r < 0:
+                sys.exit(f"UART rate change failed: {self.L.libusb_error_name(r).decode()}")
+        self.baud = baud
+        time.sleep(0.02)
+        self.read(0.05)                          # drop bytes framed at the old rate
+
+    def _alive(self, tries=3):
+        for _ in range(tries):
+            self.read(0.02)
+            self.write(b"S")
+            reply = self.read(0.3, lambda d: len(d) >= 4)
+            if len(reply) == 4 and reply[:1] == b"S":
+                return True
+        return False
+
+    def negotiate(self):
+        """Switch to the fastest UART rate both ends carry (rtl/top.v 'Q'). The board keeps a
+        new rate only after an 'S' arrives at it, so a failed try falls back to 115200."""
+        if not self._alive(1):
+            for div, ftdi, baud in FAST:          # board still fast from an earlier session?
+                self._set_host_rate(ftdi, baud)
+                if self._alive(2):
+                    return
+            self._set_host_rate(SLOW[1], SLOW[2])
+            return
+        for div, ftdi, baud in FAST:
+            self.write(bytes((ord("Q"), div)))
+            time.sleep(0.02)
+            self._set_host_rate(ftdi, baud)
+            if self._alive(3):
+                return
+            self._set_host_rate(SLOW[1], SLOW[2])
+            time.sleep(1.4)                        # board's probation timeout restores 115200
+            if not self._alive():
+                sys.exit("lost the board while trying a faster UART rate; re-plug it")
+
+    def downgrade(self):
+        """After a failed transfer at a fast rate, step down one rate (or to 115200)."""
+        rates = [r for r in FAST if r[2] < self.baud] + [SLOW]
+        if self.baud == SLOW[2]:
+            return
+        div, ftdi, baud = rates[0]
+        self.read(0.1)
+        self.write(bytes((ord("Q"), div)))
+        time.sleep(0.05)
+        self._set_host_rate(ftdi, baud)
+        if not self._alive():
+            self._set_host_rate(SLOW[1], SLOW[2])
+            time.sleep(1.4)
+            if not self._alive():
+                sys.exit("lost the board while slowing the UART; re-plug it")
+        print(f"UART now {self.baud} baud", flush=True)
 
     def write(self, data):
         n = ctypes.c_int()
@@ -130,6 +194,7 @@ def load(link, path, progress=None, cancelled=None):
                   f"checksum {expected[1]:02x} verified", flush=True)
             return
         print(f"attempt {attempt}: no valid ack (got {reply!r}), retrying", flush=True)
+        link.downgrade()
     sys.exit("upload failed 3 times; is the Game Boy design on the board (make flash)?")
 
 class TransferError(RuntimeError):
