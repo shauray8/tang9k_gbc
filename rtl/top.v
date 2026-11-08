@@ -95,25 +95,22 @@ module top (
 
     // ---------------- USB-UART (BL702, 115200 8N1) ----------------
     // 'J' <buttons>; 'L' <whole .gb image> -> 'K' <8-bit sum> (length taken from header 0x148);
-    // 'V' <line> = shades; 'W' <line> = RGB555; 'F' = post-scaler fingerprint.
-    // S/D/H/V/W/F replies are serialized so they never interleave with a captured line.
+    // 'F' = post-scaler fingerprint. Replies are serialized through one queue.
     // 'P' <0|1|2>: resume / freeze / query the core -> 'p' <{dirty cart RAM, frozen}>.
     // A/B/T/U (cartridge RAM and MBC3 clock transfer, frozen core only): see rtl/host_mem.v.
     wire u_v; wire [7:0] u_d;
     uart_rx #(.DIV(234)) urx (.clk(clk_sys), .rx(uart_rx), .valid(u_v), .data(u_d));
-    localparam S_CMD = 3'd0, S_JOY = 3'd1, S_ROM = 3'd2, S_LINE = 3'd3, S_PAUSE = 3'd4;
+    localparam S_CMD = 3'd0, S_JOY = 3'd1, S_ROM = 3'd2, S_PAUSE = 3'd4;
     reg [2:0] us;
     reg [7:0] ubtn;
     reg [21:0] idle;
-    reg cap_color;                // line request format: 0 = 'V' 2-bit shades
     // TX queue: 'L' done -> 'K' <sum>; 'S' -> 'S' <flags> <load addr[21:14]> <PC[15:8]>
     //   flags = {psram_ready, load_done, flash_busy, lcd_on, video_locked, waitlock, cart_type[1:0]}
     reg [3:0] tq;                 // bytes left to send
     reg [2:0] tq_s;               // 0 load, 1 status, 2 memory, 3 header, 4 scanout
     wire [15:0] scanout_sig; wire [7:0] scanout_frame;
     reg [23:0] scanout_reply;
-    wire tx_rdy, cap_busy, cap_we; wire [7:0] cap_d;
-    wire cap_req = u_v && us == S_LINE;
+    wire tx_rdy;
     wire [15:0] pc;
     wire lcd_on;
     wire locked_v, waitlock;
@@ -123,7 +120,7 @@ module top (
     wire core_ser_valid, menu_pending;
     wire [7:0] core_ser_data;
     wire [15:0] menu_index;
-    wire menu_arm = u_v && !hm_busy && us == S_CMD && u_d == "M" && tq == 0 && !cap_busy;
+    wire menu_arm = u_v && !hm_busy && us == S_CMD && u_d == "M" && tq == 0;
     menu_bridge menu_requests (
         .clk(clk_sys), .rst(rst || btn_sync[15]), .arm(menu_arm), .disarm(u_start || fl_start),
         .ser_valid(core_ser_valid), .ser_data(core_ser_data),
@@ -140,7 +137,7 @@ module top (
     wire hm_tx_we, hm_req, hm_we, rtc_load; wire [7:0] hm_tx_d, hm_wd;
     wire [21:0] hm_addr; wire [39:0] rtc_d, rtc_live;
     always @(posedge clk_sys) begin
-        if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0; cap_color <= 0;
+        if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0;
                        freeze <= 0; resume_cnt <= 0; dirty <= 0; end
         else begin
             if (tq != 0 && tx_rdy) tq <= tq - 1;
@@ -150,23 +147,20 @@ module top (
             if (resume_cnt != 0) resume_cnt <= resume_cnt - 1'b1;
             if (g_req && g_we && vst == 3'd5) dirty <= 1;
             if (u_start) dirty <= 0;
-            if (menu_pending && tq == 0 && !cap_busy && !u_v) begin tq <= 4; tq_s <= 5; end
+            if (menu_pending && tq == 0 && !u_v) begin tq <= 4; tq_s <= 5; end
             if (u_v && !hm_busy) case (us)
                 S_CMD: if (u_d == "J") us <= S_JOY;
                        else if (u_d == "L") us <= S_ROM;
-                       else if (cap_busy || tq != 0) ;
+                       else if (tq != 0) ;
                        else if (u_d == "P") us <= S_PAUSE;
                        else if (u_d == "M") begin tq <= 2; tq_s <= 6; end
                        else if (u_d == "S") begin tq <= 4; tq_s <= 1; end
                        else if (u_d == "D") begin tq <= 9; tq_s <= 2; end
                        else if (u_d == "H") begin tq <= 3; tq_s <= 3; end
-                       else if (u_d == "V") begin us <= S_LINE; cap_color <= 0; end
-                       else if (u_d == "W") begin us <= S_LINE; cap_color <= 1; end
                        else if (u_d == "F") begin
                            tq <= 4; tq_s <= 4; scanout_reply <= {scanout_frame, scanout_sig};
                        end
                 S_JOY: begin ubtn <= u_d; us <= S_CMD; end
-                S_LINE: us <= S_CMD;
                 S_PAUSE: begin
                     us <= S_CMD; tq <= 2; tq_s <= 7;
                     if (u_d == 8'd1 && !freeze) begin freeze <= 1; dirty <= 0; end
@@ -210,14 +204,13 @@ module top (
         default: tx_d = pc[15:8];
     endcase
     uart_tx #(.DIV(234)) utx (.clk(clk_sys), .rst(rst), .tx(uart_tx), .ready(tx_rdy),
-                              .we(tq != 0 || cap_we || hm_tx_we),
-                              .wd(tq != 0 ? tx_d : cap_we ? cap_d : hm_tx_d));
+                              .we(tq != 0 || hm_tx_we), .wd(tq != 0 ? tx_d : hm_tx_d));
 
     host_mem host_port (
         .clk(clk_sys), .rst(rst), .allow(freeze && resume_cnt == 0 && vst == 3'd5),
-        .cmd_ok(us == S_CMD && tq == 0 && !cap_busy), .abort(idle[21]),
+        .cmd_ok(us == S_CMD && tq == 0), .abort(idle[21]),
         .in_v(u_v), .in_d(u_d), .busy(hm_busy),
-        .tx_ok(tx_rdy && tq == 0 && !cap_busy && !cap_we), .tx_we(hm_tx_we), .tx_d(hm_tx_d),
+        .tx_ok(tx_rdy && tq == 0), .tx_we(hm_tx_we), .tx_d(hm_tx_d),
         .m_req(hm_req), .m_we(hm_we), .m_addr(hm_addr), .m_wd(hm_wd), .m_busy(b_busy), .m_rd(b_rd),
         .rtc_q(rtc_live), .rtc_load(rtc_load), .rtc_d(rtc_d)
     );
@@ -274,14 +267,6 @@ module top (
     assign b_addr = !test_done ? test_addr : !ld_done ? ld_m_addr : vst == 3'd1 ? 22'h104 :
                     vst == 3'd3 ? 22'h105 : hm_busy ? hm_addr : g_addr;
     assign b_wd   = !test_done ? test_wd : !ld_done ? ld_m_wd : hm_busy ? hm_wd : g_wd;
-
-    // ---------------- headless video readback ('V' <line>, see rtl/line_capture.v) ----------------
-    line_capture lcap (
-        .clk(clk_sys), .rst(rst), .req(cap_req), .line(u_d), .color_mode(cap_color),
-        .running(!gb_rst), .lcd_on(lcd_on),
-        .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py),
-        .tx_ready(tx_rdy && tq == 0), .tx_we(cap_we), .tx_d(cap_d), .busy(cap_busy)
-    );
 
     // ---------------- 720p video: GB clock enable, frame lock, 6-line ring, 5x scaler ----------------
     wire [7:0] vr, vg, vb; wire vde, vhs, vvs;
