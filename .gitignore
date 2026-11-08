@@ -12,6 +12,7 @@
 *.sav
 *.srm
 *.bin
+!/host/arcade/engine.bin
 *.fs
 *.bit
 *.vvp
