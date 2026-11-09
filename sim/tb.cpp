@@ -178,6 +178,12 @@ int main(int argc, char **argv) {
         }
     }
     if (fh) fclose(fh);
+    if (const char *so = getenv("GB_SAV_OUT")) {            // cartridge RAM after the run
+        FILE *sf = fopen(so, "wb");
+        if (!sf) { perror(so); return 2; }
+        fwrite(ext.data() + 0x3E0000, 1, 0x20000, sf);
+        fclose(sf);
+    }
     if (!write_ppm(out)) return 2;
     printf("\n[tb] ticks=%lld frames=%d pc=%04x\n", ticks, frames, g->pc_dbg);
     delete g;
