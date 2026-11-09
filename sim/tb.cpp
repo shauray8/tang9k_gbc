@@ -69,6 +69,10 @@ int main(int argc, char **argv) {
     // GB_MEM_LATENCY: system clocks from request to read data (hardware PSRAM ~10).
     const int latency = getenv("GB_MEM_LATENCY") ? atoi(getenv("GB_MEM_LATENCY")) : 0;
     int read_due = 0; unsigned read_data = 0xFF;
+    // GB_MEM_BUSY: system clocks the bridge stays busy after accepting a request (hardware
+    // acknowledges after ~10). Like psram_bridge, a request that arrives while busy is dropped.
+    const int busy_for = getenv("GB_MEM_BUSY") ? atoi(getenv("GB_MEM_BUSY")) : 0;
+    int busy_left = 0; long long dropped_reads = 0, dropped_writes = 0;
     auto write_ppm = [&](const char *path) {
         FILE *f = fopen(path, "wb");
         if (!f) { perror(path); return false; }
@@ -121,7 +125,11 @@ int main(int argc, char **argv) {
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
         g->clk = 1; g->eval();
         if (read_due > 0 && --read_due == 0) g->ext_rd = read_data;
-        if (req) {
+        if (busy_left > 0) busy_left--;
+        if (req && busy_left > 0) {
+            (we ? dropped_writes : dropped_reads)++;
+        } else if (req) {
+            busy_left = busy_for;
             if (we) ext[addr] = wd;
             else if (latency) { read_data = ext[addr]; read_due = latency; }
             else g->ext_rd = ext[addr];
@@ -186,6 +194,8 @@ int main(int argc, char **argv) {
     }
     if (!write_ppm(out)) return 2;
     printf("\n[tb] ticks=%lld frames=%d pc=%04x\n", ticks, frames, g->pc_dbg);
+    if (busy_for)
+        printf("[tb] dropped requests while busy: %lld reads, %lld writes\n", dropped_reads, dropped_writes);
     delete g;
     return ser.find("Failed") != std::string::npos ? 1 : 0;
 }

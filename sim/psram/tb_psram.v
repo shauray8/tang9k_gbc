@@ -84,8 +84,9 @@ module tb #(parameter MEM_FREQ = 81_000_000, STRESS = 0);
     // double-speed M-cycle: request at cycle 0, din_r at 10, CPU at 11, next request at 12.
     reg [7:0] cpu_sample;
     always @(posedge pclk) cpu_sample <= b_rd;
+    integer data_clk_max = 0;   // worst system clock (after the request) from which din_r is right
     task double_speed_stream;
-        integer n, idx;
+        integer n, idx, k, last_bad;
         reg [7:0] expected_mem [0:31];
         begin
             for (n = 0; n < 32; n = n + 1) expected_mem[n] = value(n);
@@ -97,7 +98,12 @@ module tb #(parameter MEM_FREQ = 81_000_000, STRESS = 0);
                 if (we) expected_mem[idx] = wd;
                 @(posedge pclk);
                 @(negedge pclk); req = 0;
-                repeat (10) @(posedge pclk);
+                last_bad = 0;
+                for (k = 1; k <= 10; k = k + 1) begin
+                    @(posedge pclk); #1;
+                    if (!we && cpu_sample !== expected_mem[idx]) last_bad = k;
+                end
+                if (!we && last_bad + 1 > data_clk_max) data_clk_max = last_bad + 1;
                 if (!we && b_rd !== expected_mem[idx])
                     $fatal(1, "double-speed input-register deadline: address %h got %h expected %h", addr, b_rd, expected_mem[idx]);
                 @(posedge pclk);
@@ -152,8 +158,8 @@ module tb #(parameter MEM_FREQ = 81_000_000, STRESS = 0);
             $fatal(1, "missing-strobe fault was not retained");
         release ram0.rwds_pe;
         release ram0.rwds_p;
-        $display("RESULT PASS stress_bytes=%0d, fast_stream=%0d, byte masks/addressing, timeout release; max_roundtrip=%0t ps",
-                 STRESS ? 512 : 8, MEM_FREQ == 162_000_000 ? 128 : 0, max_roundtrip);
+        $display("RESULT PASS stress_bytes=%0d, fast_stream=%0d, byte masks/addressing, timeout release; max_roundtrip=%0t ps, data_clk_max=%0d",
+                 STRESS ? 512 : 8, MEM_FREQ == 162_000_000 ? 128 : 0, max_roundtrip, data_clk_max);
         $finish;
     end
     initial begin #(timeout_us * 1000000); $fatal(1, "PSRAM test timed out"); end
