@@ -26,6 +26,13 @@ int main(int argc, char **argv) {
     if (!rf) { perror(argv[1]); return 2; }
     size_t rom_len = fread(ext.data(), 1, 0x3E0000, rf);
     fclose(rf);
+    // GB_SAV=<file.sav>: battery RAM to start from (raw cartridge RAM, as host/saves.py stores it)
+    if (const char *sp = getenv("GB_SAV")) {
+        FILE *sf = fopen(sp, "rb");
+        if (!sf) { perror(sp); return 2; }
+        fread(ext.data() + 0x3E0000, 1, 0x20000, sf);
+        fclose(sf);
+    }
     int type = ext[0x147];
     const bool mbc2 = type == 0x05 || type == 0x06;
     int cart = (type >= 1 && type <= 3) || mbc2 ? 1 : (type >= 0x0F && type <= 0x13) ? 2 : (type >= 0x19 && type <= 0x1E) ? 3 : 0;
@@ -98,6 +105,12 @@ int main(int argc, char **argv) {
         last_event = ticks;
         if (dump_path && hash_events == dump_event) { write_ppm(dump_path); max_ticks = ticks; }
     };
+    // GB_TRAP=<file>: stop when the CPU fetches from work RAM (C000-FDFF), the crash signature
+    // seen on hardware, and write the last 4096 distinct PCs (and their ROM bank) to <file>.
+    const char *trap_path = getenv("GB_TRAP");
+    static unsigned trace_pc[4096], trace_bank[4096]; long long trace_n = 0; unsigned last_pc = ~0u;
+    // GB_SNAP=<n>: write build/snap-<frame>.ppm every n frames.
+    const int snap_every = getenv("GB_SNAP") ? atoi(getenv("GB_SNAP")) : 0;
     while (ticks < max_ticks) {
         // Same fractional enable as the 27 MHz system domain.
         g->clk_en_fast = acc >= 154776 && acc < 225000;
@@ -115,6 +128,20 @@ int main(int argc, char **argv) {
         }
         if (g->pix_we && g->pix_y < 144 && g->pix_x < 160)
             fb[g->pix_y][g->pix_x] = rgb ? g->pix_rgb : g->pix;
+        if (trap_path && g->pc_dbg != last_pc) {
+            last_pc = g->pc_dbg;
+            trace_pc[trace_n % 4096] = last_pc;
+            trace_bank[trace_n % 4096] = g->ext_addr >> 14;
+            trace_n++;
+            if (last_pc >= 0xC000 && last_pc < 0xFE00) {
+                FILE *tf = fopen(trap_path, "w");
+                for (long long i = trace_n > 4096 ? trace_n - 4096 : 0; i < trace_n; i++)
+                    fprintf(tf, "%04x %03x\n", trace_pc[i % 4096], trace_bank[i % 4096]);
+                fclose(tf);
+                printf("\n[tb] TRAP: executing from %04x at frame %d tick %lld\n", last_pc, frames, ticks);
+                break;
+            }
+        }
         if (fh || dump_path) {
             if (!g->lcd_on) {
                 lcd_was_off = true;
@@ -126,6 +153,11 @@ int main(int argc, char **argv) {
         }
         if (g->vsync) {
             frames++;
+            if (snap_every && frames % snap_every == 0) {
+                char snap[64];
+                snprintf(snap, sizeof snap, "build/snap-%05d.ppm", frames);
+                write_ppm(snap);
+            }
             int m = 0;
             if (const char *p = getenv("GB_PRESS")) {
                 int a, b, k, n;
