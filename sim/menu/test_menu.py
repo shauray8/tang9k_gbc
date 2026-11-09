@@ -70,34 +70,40 @@ class MenuTests(unittest.TestCase):
     def test_empty_library_cannot_launch(self):
         self.run_menu(0, '30:33:16,40:90:2,100:103:128', [])
 
-    def test_user_image_becomes_three_colour_card_in_a_concrete_border(self):
-        # 100x96 BMP (wider than 4:5, so the sides are cropped): red / green on top, white below.
-        colours = {(0, 0): (255, 0, 0), (1, 0): (0, 255, 0), (0, 1): (255, 255, 255), (1, 1): (255, 255, 255)}
-        w, h = 100, 96
-        rows = b''.join(bytes(c for x in range(w) for c in colours[(x >= 50, y >= 48)][::-1])
+    def test_box_scan_becomes_card_without_its_side_stripe_and_keeps_a_small_logo(self):
+        # 100x100 box scan: blue stripe down the left, dark purple art, a small yellow logo.
+        w = h = 100
+        def colour(x, y):
+            if x < 20:
+                return (0, 0, 255)
+            if 60 <= x < 70 and 10 <= y < 20:
+                return (255, 220, 0)
+            return (60, 20, 90) if y < 60 else (150, 110, 200)
+        rows = b''.join(bytes(c for x in range(w) for c in colour(x, y)[::-1])
                         for y in reversed(range(h)))                       # BGR, bottom-up
         header = (b'BM' + (54 + len(rows)).to_bytes(4, 'little') + bytes(4) + (54).to_bytes(4, 'little')
                   + (40).to_bytes(4, 'little') + w.to_bytes(4, 'little') + h.to_bytes(4, 'little')
                   + (1).to_bytes(2, 'little') + (24).to_bytes(2, 'little') + bytes(24))
         with tempfile.TemporaryDirectory(dir=self.out) as temporary:
             folder = Path(temporary)
-            (folder / 'Game (USA).bmp').write_bytes(header + rows)
-            game = menu.Game(folder / 'Game (USA).gbc', 'GAME', 'GBC', True)
-            self.assertEqual(menu.art_source(game), folder / 'Game (USA).bmp')
-            palette, pixels = menu._quantize(menu._image_rgb(folder / 'Game (USA).bmp'))
+            (folder / 'art').mkdir()
+            (folder / 'art' / 'pokemon.bmp').write_bytes(header + rows)    # matched by title words
+            game = menu.Game(folder / 'Pokemon - Crystal (USA).gbc', 'POKEMON - CRYSTAL VERSION', 'GBC', True)
+            self.assertEqual(menu.art_source(game), folder / 'art' / 'pokemon.bmp')
+            palette, pixels = menu._quantize(menu._image_rgb(folder / 'art' / 'pokemon.bmp'))
         self.assertEqual((len(pixels[0]), len(pixels)), (28, 36))
         rgb = [tuple(int(c[i:i+2], 16) for i in (1, 3, 5)) for c in palette]
-        def near(index, expected):
-            return max(abs(a-b) for a, b in zip(rgb[index], expected)) < 24
-        self.assertEqual(len(palette), 3)
-        self.assertTrue(near(2, (255, 255, 255)))                          # lightest last
-        self.assertTrue(near(pixels[2][2], (255, 0, 0)))                    # top left red
-        self.assertTrue(near(pixels[2][25], (0, 255, 0)))                   # top right green
-        self.assertEqual(pixels[33][2], 2)                                  # white bottom
+        def near(colour, expected, tolerance=60):
+            return max(abs(a-b) for a, b in zip(colour, expected)) < tolerance
+        self.assertEqual(len(palette), 4)
+        self.assertTrue(any(near(c, (255, 220, 0)) for c in rgb), f'logo colour lost: {palette}')
+        self.assertFalse(any(near(c, (0, 0, 255)) for c in rgb), f'side stripe kept: {palette}')
+        lumas = [menu._luma(c) for c in rgb]
+        self.assertEqual(lumas, sorted(lumas))                              # darkest first
         card = menu.bordered(pixels)                                        # 32x40 slot
         self.assertEqual({card[y][x] for y in (0, 1, 38, 39) for x in range(32)}, {0})
         self.assertEqual({card[y][x] for x in (0, 1, 30, 31) for y in range(40)}, {0})
-        self.assertEqual(card[4][4], pixels[2][2] + 1)                      # picture uses 1-3
+        self.assertEqual(card[30][10], menu.LUMA_TO_COLOUR[pixels[28][8]])  # picture pixel
 
     def test_case_insensitive_search_and_no_results(self):
         games = [menu.Game(Path('Mario Deluxe.gbc'), 'MARIO DELUXE', 'GBC', True),
