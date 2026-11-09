@@ -138,21 +138,21 @@ def art_source(game, folder=None):
                         return Path(str(base) + suffix)
         return None
 
-    def by_words(dirs):
+    def by_words(dirs, allowed):
         best = None
         for d in dirs:
             if d.is_dir():
                 for path in sorted(d.iterdir()):
                     name = _slug(path.stem)
-                    if path.suffix.lower() in IMAGE_SUFFIXES and name and set(name.split('-')) <= words \
+                    if path.suffix.lower() in allowed and name and set(name.split('-')) <= words \
                             and (best is None or len(name) > len(_slug(best.stem))):
                         best = path
         return best
 
     own = [game.path.parent, game.path.parent / 'art']
     bundled = [Path(folder)] if folder else []
-    return exact(own, suffixes + ('.json',)) or by_words([own[1]]) or \
-        exact(bundled, suffixes + ('.json',))
+    return exact(own, suffixes + ('.json',)) or by_words([own[1]], IMAGE_SUFFIXES) or \
+        exact(bundled, suffixes + ('.json',)) or by_words(bundled, IMAGE_SUFFIXES + ('.json',))
 
 
 def _read_bmp(data):
