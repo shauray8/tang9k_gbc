@@ -48,8 +48,8 @@ int main(int argc, char **argv) {
     long long switch_start[2] = {-1, -1};
     bool switch_done[2] = {false, false};
     // GB_FREEZE_PERIOD: every N system clocks, freeze the core like the host save path:
-    // clock enables off for 400 clocks while the bus data is scrambled, then a resume
-    // reissue followed by 20 held clocks.
+    // hold for 400 clocks while the bus data is scrambled (the PPU keeps running), then a
+    // resume reissue followed by 20 held clocks. No core bus request may start while held.
     const long long freeze_period = getenv("GB_FREEZE_PERIOD") ? atoll(getenv("GB_FREEZE_PERIOD")) : 0;
     long long freeze_phase = 0;
     while (t < max_ticks) {
@@ -62,15 +62,20 @@ int main(int argc, char **argv) {
         g->clk_en_fast |= g->clk_en;
         // The video timebase keeps running during a freeze; only the core's enables stop.
         if (g->clk_en) { acc -= 450000; t++; }
-        g->bus_resume = 0;
+        g->bus_resume = 0; g->hold = 0;
         if (freeze_period) {
             const long long p = freeze_phase++ % freeze_period;
-            if (p < 420) { g->clk_en = 0; g->clk_en_fast = 0; }
+            if (p < 420) g->hold = 1;
             if (p < 400) g->ext_rd = 0x5A;
             if (p == 400) g->bus_resume = 1;
         }
         g->clk = 0; g->eval();
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
+        if (freeze_period && req && freeze_phase % freeze_period > 1 &&
+            freeze_phase % freeze_period <= 400) {
+            printf("\n[banktest] %s: FAIL bus request %06x while held\n", argv[1], addr);
+            return 1;
+        }
         g->clk = 1; g->eval();
         if (req) { if (we) ext[addr] = wd; else g->ext_rd = ext[addr]; }
         if (g->ser_valid && !passed) {

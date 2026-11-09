@@ -31,6 +31,7 @@ module gb (
     output            ext_we,
     output     [7:0]  ext_wd,
     input      [7:0]  ext_rd,
+    input             hold,             // host freeze: CPU, timer and both DMA engines pause; PPU runs
     input             bus_resume,       // host released a freeze: reissue the held bus access
     input             rtc_host_load,
     input      [39:0] rtc_host_d,
@@ -50,18 +51,20 @@ module gb (
     wire stop_wake = stopped && stop_joy_in != 4'hF;
     wire cpu_tick = double_speed ? clk_en_fast : clk_en;
     wire cpu_mcycle = cpu_tick && tdiv == 2'd3;
-    wire ce = cpu_mcycle && !stopped && speed_wait == 0;
+    // A host freeze stops everything that uses the external bus (CPU, OAM DMA, VRAM DMA)
+    // but keeps the PPU on the video timebase, so HDMI stays locked during save transfers.
+    wire ce = cpu_mcycle && !stopped && speed_wait == 0 && !hold;
     reg hdma_active, hdma_hblank, hdma_busy, hdma_pending, hdma_half, hdma_used, hdma_req;
     reg [15:0] hdma_src;
     reg [12:0] hdma_dst;
     reg [6:0] hdma_left;
     wire cpu_halted, ppu_hblank;
-    wire hdma_start = hdma_pending && hdma_active && !dma_act && !cpu_halted &&
+    wire hdma_start = hdma_pending && hdma_active && !dma_act && !cpu_halted && !hold &&
                       (!hdma_hblank || (ppu_hblank && !hdma_used));
     wire hdma_owns = hdma_busy || hdma_start;
     wire hdma_hold = hdma_busy || hdma_pending || (hdma_active && !hdma_hblank);
     wire cpu_ce = ce && !hdma_hold;
-    wire hdma_put = hdma_busy && clk_en && hdma_half;
+    wire hdma_put = hdma_busy && clk_en && hdma_half && !hold;
     wire hdma_block_end = hdma_src[3:0] == 4'hF;
     wire hdma_release = hdma_put && (hdma_dst == 13'h1FFF ||
                        (hdma_block_end && (hdma_left == 0 || hdma_hblank)));
@@ -299,7 +302,7 @@ module gb (
                 hdma_half <= 0;
                 if (hdma_hblank) hdma_used <= 1;
             end
-            if (hdma_busy && clk_en) begin
+            if (hdma_busy && clk_en && !hold) begin
                 hdma_half <= !hdma_half;
                 if (hdma_half) begin
                     hdma_src <= hdma_src + 1'b1;

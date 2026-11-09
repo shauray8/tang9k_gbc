@@ -274,7 +274,7 @@ module top (
     wire gb_rst = rst || loading || btn_sync[15];
     wire g_req, g_we; wire [21:0] g_addr; wire [7:0] g_wd;
     gb core (
-        .clk(clk_sys), .rst(gb_rst), .clk_en(tick && !core_hold), .clk_en_fast(tick_fast && !core_hold),
+        .clk(clk_sys), .rst(gb_rst), .clk_en(tick), .clk_en_fast(tick_fast), .hold(core_hold),
         .buttons(jb),
         .cgb_mode(cgb_mode), .boot_en(boot_en),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
