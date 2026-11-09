@@ -4,6 +4,7 @@ module gb_timer (
     input            clk,
     input            rst,
     input            ce,
+    input            boot,      // power-on through the boot ROM (internal counter starts at 8)
     input            div_reset, // STOP resets DIV even when its M-cycle enable is paused
     input      [7:0] addr_lo,   // low byte, valid when sel
     input            sel,       // addr in FF04-FF07
@@ -65,7 +66,7 @@ module gb_timer (
     always @(posedge clk) begin
         irq <= 0;
         if (rst) begin
-            div <= 16'hABCC; tima <= 0; tma <= 0; tac <= 0; ovf <= 0;
+            div <= boot ? 16'h0008 : 16'hABCC; tima <= 0; tma <= 0; tac <= 0; ovf <= 0;
         end else if (ce || div_reset) begin
             if (ce && sel && wr && addr_lo[1:0] == 2'd2) tma <= din;
             irq <= nirq;

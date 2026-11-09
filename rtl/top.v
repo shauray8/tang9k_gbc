@@ -138,7 +138,8 @@ module top (
     wire cgb_mode, cart_rtc, cart_ram, cart_mbc2;
     // Freeze gates the core's clock enables. Resume first reissues the held bus access,
     // then waits until its reply is valid before the core advances again.
-    reg freeze, dirty;
+    // 'P' 3/4 enables/disables the boot ROM (uploaded to 3D0000) for the next game start.
+    reg freeze, dirty, boot_en;
     reg [4:0] resume_cnt;
     wire core_hold = freeze || resume_cnt != 0;
     wire bus_resume = resume_cnt == 5'd20;
@@ -146,7 +147,7 @@ module top (
     wire [21:0] hm_addr; wire [39:0] rtc_d, rtc_live;
     always @(posedge clk_sys) begin
         if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0;
-                       freeze <= 0; resume_cnt <= 0; dirty <= 0;
+                       freeze <= 0; resume_cnt <= 0; dirty <= 0; boot_en <= 0;
                        udiv <= 9'd234; baud_switch <= 0; probation <= 0; end
         else begin
             if (tq != 0 && tx_rdy) tq <= tq - 1;
@@ -187,6 +188,8 @@ module top (
                     us <= S_CMD; tq <= 2; tq_s <= 7;
                     if (u_d == 8'd1 && !freeze) begin freeze <= 1; dirty <= 0; end
                     else if (u_d == 8'd0 && freeze) begin freeze <= 0; resume_cnt <= 5'd20; end
+                    else if (u_d == 8'd3) boot_en <= 1;
+                    else if (u_d == 8'd4) boot_en <= 0;
                 end
                 default: ;
             endcase
@@ -222,7 +225,7 @@ module top (
         7'b110_0010: tx_d = "M";
         7'b110_0001: tx_d = 8'h01; // launcher protocol version
         7'b111_0010: tx_d = "p";
-        7'b111_0001: tx_d = {6'd0, dirty, freeze};
+        7'b111_0001: tx_d = {5'd0, boot_en, dirty, freeze};
         default: tx_d = pc[15:8];
     endcase
     uart_tx utx (.clk(clk_sys), .rst(rst), .div(udiv), .tx(uart_tx), .ready(tx_rdy), .idle(tx_idle),
@@ -273,7 +276,7 @@ module top (
     gb core (
         .clk(clk_sys), .rst(gb_rst), .clk_en(tick && !core_hold), .clk_en_fast(tick_fast && !core_hold),
         .buttons(jb),
-        .cgb_mode(cgb_mode),
+        .cgb_mode(cgb_mode), .boot_en(boot_en),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
         .lcd_on(lcd_on),
         .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram), .cart_mbc2(cart_mbc2),
@@ -295,7 +298,7 @@ module top (
     wire [7:0] vr, vg, vb; wire vde, vhs, vvs;
     video_buffer vbuf (
         .clk_sys(clk_sys), .rst_sys(rst), .run(!gb_rst), .lcd_on(lcd_on), .gb_vsync(gb_vsync),
-        .cgb_mode(cgb_mode),
+        .cgb_mode(cgb_mode || boot_en),   // booted carts always output RGB (CGB or DMG-compat colours)
         .pix_we(pix_we), .pix_x(px), .pix_y(py), .pix(pix), .pix_rgb(pix_rgb),
         .tick(tick), .tick_fast(tick_fast), .locked(locked_v), .waitlock(waitlock),
         .clk_pix(clk_pix), .rst_pix(vrst),

@@ -37,13 +37,14 @@ module host_mem (
     reg [1:0] kind;
     reg [2:0] cnt;                // header bytes still expected / payload bytes still to send
     reg [39:0] hdr;               // shift-in only: header, then the clock value for 'U'
-    reg [16:0] addr, left;
+    reg [17:0] addr;
+    reg [16:0] left;
     reg [7:0] sum, data, tag;
     reg slot_v;
     assign busy = st != IDLE;
     assign m_req = (st == RD_ISSUE && !m_busy) || (st == WR && slot_v && !m_busy);
     assign m_we = st == WR;
-    assign m_addr = {5'b11111, addr};
+    assign m_addr = {4'b1111, addr};    // 3C0000-3FFFFF: boot ROM (3D0000) and save RAM (3E0000)
     assign m_wd = data;
     assign rtc_d = hdr;
     // Same-cycle handshake: a byte is offered only while the UART FIFO has room.
@@ -78,7 +79,7 @@ module host_mem (
                 cnt <= cnt - 1'b1;
                 if (cnt == 1) begin
                     sum <= 0; slot_v <= 0;
-                    addr <= hdr[24:8];   // a2[0] a1 a0; hdr[7:0] is the length high byte
+                    addr <= hdr[25:8];   // a2[1:0] a1 a0; hdr[7:0] is the length high byte
                     left <= {hdr[7:0], in_d} == 0 ? 17'h10000 : {1'b0, hdr[7:0], in_d};
                     if (kind == K_LOAD) begin
                         rtc_load <= 1;   // hdr holds all five clock bytes from the next cycle

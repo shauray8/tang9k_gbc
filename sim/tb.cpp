@@ -40,6 +40,16 @@ int main(int argc, char **argv) {
     g->cart_mbc2 = mbc2;
     g->cart_ram = rb != 0 || mbc2;
     g->cgb_mode = (ext[0x143] & 0x80) != 0;
+    // GB_BOOT=<cgb_boot.bin>: run the boot ROM from PSRAM 3D0000 (it picks CGB / DMG-compat mode)
+    g->boot_en = 0;
+    if (const char *bp = getenv("GB_BOOT")) {
+        FILE *bf = fopen(bp, "rb");
+        if (!bf) { perror(bp); return 2; }
+        fread(ext.data() + 0x3D0000, 1, 0x900, bf);
+        fclose(bf);
+        g->boot_en = 1;
+    }
+    const bool rgb = g->cgb_mode || g->boot_en;
     static unsigned short fb[144][160];
     memset(fb, 0, sizeof fb);
     std::string ser;
@@ -58,7 +68,7 @@ int main(int argc, char **argv) {
         fprintf(f, "P6 160 144 255\n");
         static const unsigned char shade[4] = {0xE0, 0xA8, 0x58, 0x10};
         for (int y = 0; y < 144; y++) for (int x = 0; x < 160; x++) {
-            if (g->cgb_mode) {
+            if (rgb) {
                 unsigned v = fb[y][x];
                 for (int shift : {0, 5, 10}) {
                     unsigned c = (v >> shift) & 31;
@@ -79,7 +89,7 @@ int main(int argc, char **argv) {
     auto frame_hash = [&](char kind) {
         unsigned long long h = 0xcbf29ce484222325ULL;
         for (int y = 0; y < 144; y++) for (int x = 0; x < 160; x++) {
-            unsigned v = kind == 'O' ? (g->cgb_mode ? 0x7FFF : 0) : fb[y][x];
+            unsigned v = kind == 'O' ? (rgb ? 0x7FFF : 0) : fb[y][x];
             h = (h ^ (v & 0xFF)) * 0x100000001b3ULL;
             h = (h ^ (v >> 8)) * 0x100000001b3ULL;
         }
@@ -104,7 +114,7 @@ int main(int argc, char **argv) {
             else g->ext_rd = ext[addr];
         }
         if (g->pix_we && g->pix_y < 144 && g->pix_x < 160)
-            fb[g->pix_y][g->pix_x] = g->cgb_mode ? g->pix_rgb : g->pix;
+            fb[g->pix_y][g->pix_x] = rgb ? g->pix_rgb : g->pix;
         if (fh || dump_path) {
             if (!g->lcd_on) {
                 lcd_was_off = true;

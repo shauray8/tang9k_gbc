@@ -14,6 +14,8 @@ module ppu (
     input             ce_t,
     input             ce,
     input             cgb_mode,
+    input             dmg_color,   // CGB running a DMG cart: shades index palette RAM 0 (BG), 0/1 (OBJ)
+    input             boot,        // power-on through a boot ROM: LCD starts off
     input      [15:0] cpu_addr,
     input             cpu_wr,      // already qualified with ce
     input      [7:0]  cpu_din,
@@ -196,11 +198,13 @@ module ppu (
         if (ocpd_wr && !ocps[0]) ocr_lo[ocps[5:1]] <= cpu_din;
         if (ocpd_wr &&  ocps[0]) ocr_hi[ocps[5:1]] <= cpu_din;
     end
-    wire [4:0] bcr_ri = mode == 2'd3 ? {sh_at[2:0], r_bgc} : bcps[5:1];
-    wire [4:0] ocr_ri = mode == 2'd3 ? {sf_pal[23:21], r_spc} : ocps[5:1];
+    // In DMG-compatibility mode the boot ROM's palettes colour the DMG shades:
+    // BG shade n -> BG palette 0 colour n, OBJ shade n -> OBJ palette OBP0/OBP1 colour n.
+    wire [4:0] bcr_ri = mode != 2'd3 ? bcps[5:1] : dmg_color ? {3'd0, r_shade} : {sh_at[2:0], r_bgc};
+    wire [4:0] ocr_ri = mode != 2'd3 ? ocps[5:1] : dmg_color ? {2'd0, sf_dp[7], r_shade} : {sf_pal[23:21], r_spc};
     wire [7:0] bcr_lq = bcr_lo[bcr_ri], bcr_hq = bcr_hi[bcr_ri];
     wire [7:0] ocr_lq = ocr_lo[ocr_ri], ocr_hq = ocr_hi[ocr_ri];
-    wire [14:0] r_rgb = !cgb_mode ? {r_grey, r_grey, r_grey} :
+    wire [14:0] r_rgb = !(cgb_mode || dmg_color) ? {r_grey, r_grey, r_grey} :
                         r_obj ? {ocr_hq[6:0], ocr_lq} : {bcr_hq[6:0], bcr_lq};
 
     // ---------------- CPU reads ----------------
@@ -250,7 +254,7 @@ module ppu (
     always @(posedge clk) begin
         irq_vblank <= 0; irq_stat <= 0; pix_we <= 0; vsync <= 0;
         if (rst) begin
-            LCDC <= 8'h91; STATW <= 0; SCY <= 0; SCX <= 0; LYC <= 0; vbk <= 0;
+            LCDC <= boot ? 8'h00 : 8'h91; STATW <= 0; SCY <= 0; SCX <= 0; LYC <= 0; vbk <= 0;
             BGP <= 8'hFC; OBP0 <= 8'hFF; OBP1 <= 8'hFF; WY <= 0; WX <= 0;
             bcps <= 0; ocps <= 0; opri <= 0;
             ly <= 0; dot <= 0; mode <= 2'd2; stat_prev <= 0;

@@ -9,6 +9,7 @@ module sm83 (
     input             rst,
     input             ce,
     input             cgb_mode, // selects documented post-boot CPU state; stable through reset
+    input             boot,     // a boot ROM is mapped: start from its power-on state at 0000
     output reg [15:0] addr,
     output reg [7:0]  dout,
     output reg        wr,
@@ -146,9 +147,10 @@ module sm83 (
             B = 0; C = cgb_mode ? 8'h00 : 8'h13;
             D = cgb_mode ? 8'hFF : 8'h00; E = cgb_mode ? 8'h56 : 8'hD8;
             H = cgb_mode ? 8'h00 : 8'h01; L = cgb_mode ? 8'h0D : 8'h4D;
-            SP = 16'hFFFE; PC = 16'h0100; IR = 0; Z = 0; W = 0; // post-boot-ROM state
+            SP = 16'hFFFE; IR = 0; Z = 0; W = 0;   // post-boot-ROM state unless booting
+            PC = boot ? 16'h0000 : 16'h0100;
             mc = 0; IME = 0; ime_delay = 0; halt = 0; intm = 0; haltbug = 0; IF = 0; IE = 0;
-            addr <= 16'h0100; wr <= 0; rd <= 1; dout <= 0;
+            addr <= boot ? 16'h0000 : 16'h0100; wr <= 0; rd <= 1; dout <= 0;
         end else begin
             if (ce) begin
                 // commit IF/IE writes of the cycle that just ended

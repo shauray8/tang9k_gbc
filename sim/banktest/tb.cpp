@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
     static const unsigned ram_banks[] = {0, 1, 1, 4, 16, 8};
     const unsigned rb = ext[0x149] < 6 ? ram_banks[ext[0x149]] : 0;
     g->cart_ram = rb != 0 || g->cart_mbc2;
-    g->ram_mask = rb ? rb - 1 : 0; g->cgb_mode = cgb;
+    g->ram_mask = rb ? rb - 1 : 0; g->cgb_mode = cgb; g->boot_en = 0;
     g->clk_en = 1; g->clk_en_fast = 1; g->buttons = 0; g->ext_rd = 0xFF; g->rst = 1;
     for (int i = 0; i < 8; i++) { g->clk = 0; g->eval(); g->clk = 1; g->eval(); }
     g->rst = 0;

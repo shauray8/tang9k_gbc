@@ -21,7 +21,10 @@ module gb (
     input             cart_ram,         // header declares cartridge RAM
     input      [8:0]  rom_mask,         // ROM bank mask (banks - 1)
     input      [3:0]  ram_mask,         // RAM bank mask
-    input             cgb_mode,         // CGB-mode cartridge (header 0x143 bit 7): enables SVBK/VBK
+    input             cgb_mode,         // CGB-mode cartridge (header 0x143 bit 7), used without a boot ROM
+    // Boot ROM (SameBoy's open CGB boot ROM) at PSRAM 3D0000, mapped at 0000-00FF and 0200-08FF
+    // until FF50 is written. It picks CGB or DMG-compatibility mode itself via KEY0 (FF4C).
+    input             boot_en,
     // external cartridge memory (PSRAM via bridge)
     output     [21:0] ext_addr,
     output            ext_req,          // 1-clk pulse at M-cycle start
@@ -72,12 +75,23 @@ module gb (
     reg [7:0] cpu_din;
     wire [4:0] irq;
 
+    // Effective CGB features: chosen by the boot ROM's KEY0 write, else by the cart header.
+    reg boot_on, key0_dmg;
+    wire cgb = boot_en ? !key0_dmg : cgb_mode;
+
     sm83 cpu (
         .clk(clk), .rst(rst), .ce(cpu_ce), .addr(a), .dout(cpu_dout), .wr(cpu_wr), .rd(cpu_rd),
-        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .halted(cpu_halted), .stop_req(stop_req), .pc_dbg(pc_dbg)
+        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .boot(boot_en), .halted(cpu_halted),
+        .stop_req(stop_req), .pc_dbg(pc_dbg)
     );
 
     wire wr_now = cpu_ce && cpu_wr;
+    always @(posedge clk)
+        if (rst) begin boot_on <= boot_en; key0_dmg <= 0; end
+        else begin
+            if (wr_now && boot_on && a == 16'hFF4C) key0_dmg <= cpu_dout[2];
+            if (wr_now && boot_on && a == 16'hFF50) boot_on <= 0;
+        end
 
     // STOP arms an oscillator pause, not a derived clock. PPU dots continue
     // during speed switching; normal STOP also stops them until joypad wake.
@@ -85,11 +99,11 @@ module gb (
         if (rst) begin
             double_speed <= 0; key_prepare <= 0; speed_wait <= 0; stopped <= 0;
         end else begin
-            if (wr_now && a == 16'hFF4D && cgb_mode) key_prepare <= cpu_dout[0];
+            if (wr_now && a == 16'hFF4D && cgb) key_prepare <= cpu_dout[0];
             if (cpu_mcycle && speed_wait != 0) speed_wait <= speed_wait - 1'b1;
             if (stop_wake) stopped <= 0;
             if (stop_enter) begin
-                if (cgb_mode && key_prepare) begin
+                if (cgb && key_prepare) begin
                     double_speed <= !double_speed;
                     key_prepare <= 0;
                     speed_wait <= 12'd2050;
@@ -176,7 +190,9 @@ module gb (
         .din(cpu_dout), .dout(rtc_q),
         .host_load(rtc_host_load), .host_d(rtc_host_d), .live(rtc_live)
     );
-    assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} :
+    wire boot_sel = boot_on && ma[15:12] == 4'h0 && (ma[11:8] == 4'h0 || (ma[11:8] >= 4'h2 && ma[11:8] <= 4'h8));
+    assign ext_addr = boot_sel ? {10'h3D0, ma[11:0]} :
+                      rom_sel ? {bank[7:0], ma[13:0]} :
                       {5'b11111, rbank, cart_mbc2 ? {4'd0, ma[8:0]} : ma[12:0]};
     reg cyc_start;                // also set right after reset: the first opcode fetch (0100) needs a request
     always @(posedge clk) cyc_start <= ce || rst || hdma_release;
@@ -192,8 +208,8 @@ module gb (
     reg [2:0] svbk;               // stored as written (reads back 0 after writing 0)
     always @(posedge clk)
         if (rst) svbk <= 0;
-        else if (wr_now && a == 16'hFF70 && cgb_mode) svbk <= cpu_dout[2:0];
-    wire [2:0] wbank = !ma[12] ? 3'd0 : (cgb_mode && svbk != 0) ? svbk : 3'd1;
+        else if (wr_now && a == 16'hFF70 && cgb) svbk <= cpu_dout[2:0];
+    wire [2:0] wbank = !ma[12] ? 3'd0 : (cgb && svbk != 0) ? svbk : 3'd1;
     wire [14:0] wram_a = {wbank, ma[11:0]};
     reg [7:0] wram [0:32767];
     reg [7:0] wram_q;
@@ -216,7 +232,7 @@ module gb (
     wire tim_irq;
     wire tim_sel = a[15:2] == 14'h3FC1; // FF04-FF07
     gb_timer timer (
-        .clk(clk), .rst(rst), .ce(ce), .div_reset(stop_enter), .addr_lo(a[7:0]), .sel(tim_sel), .wr(wr_now),
+        .clk(clk), .rst(rst), .ce(ce), .boot(boot_en), .div_reset(stop_enter), .addr_lo(a[7:0]), .sel(tim_sel), .wr(wr_now),
         .din(cpu_dout), .dout(tim_q), .irq(tim_irq)
     );
 
@@ -235,7 +251,8 @@ module gb (
                            rom_sel ? ext_rd : cart_q;
 
     ppu ppu (
-        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release), .cgb_mode(cgb_mode),
+        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release), .cgb_mode(cgb),
+        .dmg_color(boot_en && key0_dmg), .boot(boot_en),
         .cpu_addr(hdma_busy ? {3'b100, hdma_dst} : a),
         .cpu_wr(hdma_busy ? hdma_put : wr_now && !cpu_blk),
         .cpu_din(hdma_busy ? hdma_data : cpu_dout), .cpu_dout(ppu_q),
@@ -296,7 +313,7 @@ module gb (
                     end
                 end
             end
-            if (wr_now && cgb_mode) case (a)
+            if (wr_now && cgb) case (a)
                 16'hFF51: if (!hdma_active) hdma_src[15:8] <= cpu_dout;
                 16'hFF52: if (!hdma_active) hdma_src[7:0] <= {cpu_dout[7:4], 4'b0};
                 16'hFF53: if (!hdma_active) hdma_dst[12:8] <= cpu_dout[4:0];
@@ -375,9 +392,9 @@ module gb (
         else if (a == 16'hFF01)  cpu_din = sb;
         else if (a == 16'hFF02)  cpu_din = {sc[7], 6'b111111, sc[0]};
         else if (a == 16'hFF46)  cpu_din = dma_hi;
-        else if (a == 16'hFF4D)  cpu_din = cgb_mode ? {double_speed, 6'b111111, key_prepare} : 8'hFF;
-        else if (a == 16'hFF55)  cpu_din = cgb_mode ? {!hdma_active, hdma_left} : 8'hFF;
-        else if (a == 16'hFF70)  cpu_din = cgb_mode ? {5'b11111, svbk} : 8'hFF;
+        else if (a == 16'hFF4D)  cpu_din = cgb ? {double_speed, 6'b111111, key_prepare} : 8'hFF;
+        else if (a == 16'hFF55)  cpu_din = cgb ? {!hdma_active, hdma_left} : 8'hFF;
+        else if (a == 16'hFF70)  cpu_din = cgb ? {5'b11111, svbk} : 8'hFF;
         else                     cpu_din = 8'hFF;
     end
 endmodule
