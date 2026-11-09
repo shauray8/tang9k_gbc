@@ -13,6 +13,8 @@ talks to the bridge's UART endpoints directly over libusb (bundled with the tool
   gbctl.py play            open a window; keyboard = joypad (window must have focus)
                            arrows = D-pad, Z = A, X = B, Enter = Start, Backspace/Shift = Select
   gbctl.py scanout         fingerprint of the frame actually sent to HDMI (changes => running)
+  gbctl.py load --boot game.gb   same as load, but start through the CGB boot ROM (logo, DMG
+                           colourisation). Uses $GB_BOOT_ROM or SameBoy's open cgb_boot.bin.
 """
 import ctypes, os, sys, time
 
@@ -28,6 +30,9 @@ KEYS = {"Right": "right", "Left": "left", "Up": "up", "Down": "down", "z": "a", 
 # UART rates: (27 MHz / baud divisor on the FPGA, FTDI divisor value, baud). Tried fastest first.
 SLOW = (234, 0x001A, 115_200)
 FAST = ((9, 0, 3_000_000), (18, 2, 1_500_000), (27, 3, 1_000_000), (54, 6, 500_000))
+BOOT_ROM = os.environ.get("GB_BOOT_ROM", os.path.join(ROOT, "..", "tools-ref", "SameBoy", "build",
+                                                      "bin", "BootROMs", "cgb_boot.bin"))
+BOOT_BASE = 0x3D0000   # boot ROM image in PSRAM; ROMs above this size run without it
 
 
 class Link:
@@ -158,13 +163,33 @@ class UploadCancelled(RuntimeError):
     pass
 
 
-def load(link, path, progress=None, cancelled=None):
+def set_boot(link, rom_size):
+    """Map the CGB boot ROM for the next game start; returns whether it is enabled."""
+    data = open(BOOT_ROM, "rb").read() if os.path.exists(BOOT_ROM) else b""
+    on = len(data) == 0x900 and rom_size <= BOOT_BASE
+    frozen = core_pause(link, 2)[0]   # the launcher keeps the core frozen across a load
+    core_pause(link, 1)
+    try:
+        if on:
+            write_memory(link, BOOT_BASE, data)
+    finally:
+        core_pause(link, 3 if on else 4)
+        if not frozen:
+            core_pause(link, 0)
+    return on
+
+
+def load(link, path, progress=None, cancelled=None, boot=False):
     with open(path, "rb") as source:
         rom = source.read()
     size = 32768 << rom[0x148] if len(rom) > 0x148 and rom[0x148] <= 7 else len(rom)
     if size > 0x3E0000:
         sys.exit(f"{size} bytes: larger than the 3.875 MB PSRAM ROM area")
     rom = rom[:size].ljust(size, b"\xff")
+    if boot:
+        set_boot(link, size)
+    else:
+        core_pause(link, 4)   # e.g. the launcher itself starts directly at 0100
     expected = b"K" + bytes([sum(rom) & 0xFF])
 
     def check_cancelled():
@@ -445,12 +470,15 @@ def scanout(link):
 
 if __name__ == "__main__":
     cmds = {"load": 3, "play": 2, "status": 2, "diagnose": 2, "scanout": 2}
+    boot = "--boot" in sys.argv
+    if boot:
+        sys.argv.remove("--boot")
     if len(sys.argv) < 2 or sys.argv[1] not in cmds or len(sys.argv) < cmds[sys.argv[1]]:
         sys.exit(__doc__)
     link = Link()
     try:
         if sys.argv[1] == "load":
-            load(link, sys.argv[2])
+            load(link, sys.argv[2], boot=boot)
         elif sys.argv[1] == "play":
             play(link)
         elif sys.argv[1] == "diagnose":

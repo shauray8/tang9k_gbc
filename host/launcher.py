@@ -124,7 +124,8 @@ class Library:
             self._store(resume=False)   # failure aborts the switch; the old game resumes
         self.current, self.title = None, None
         self.link.write(b'J\x00')
-        gbctl.load(self.link, str(path), progress=progress, cancelled=self._cancel.is_set)
+        gbctl.load(self.link, str(path), progress=progress, cancelled=self._cancel.is_set,
+                   boot=game is not None)
         if self._cancel.is_set():
             raise gbctl.UploadCancelled("Upload cancelled")
         cart = saves.cartridge(path) if game is not None else None
