@@ -228,7 +228,7 @@ class UploadCancelled(RuntimeError):
 def set_boot(link, rom_size):
     """Map the CGB boot ROM for the next game start; returns whether it is enabled."""
     data = open(BOOT_ROM, "rb").read() if os.path.exists(BOOT_ROM) else b""
-    on = len(data) == 0x900 and rom_size <= BOOT_BASE
+    on = len(data) == 0x900 and rom_size <= BOOT_BASE and os.environ.get("GB_BOOT") != "off"
     frozen = core_pause(link, 2)[0]   # the launcher keeps the core frozen across a load
     core_pause(link, 1)
     try:
@@ -394,8 +394,19 @@ def play(link, library=None):
                 pending.pop(b, None); held.discard(b); send()
             pending[b] = root.after(30, rel)
 
+    combo_since = [None]
+
     def keepalive():                              # resend state so a lost byte can't stick a key
         send(force=True)
+        # Select + Start held for 2 s in a game: save it and return to the library (same as F1).
+        if library is not None and library.title is not None and {"select", "start"} <= held:
+            if combo_since[0] is None:
+                combo_since[0] = time.monotonic()
+            elif time.monotonic() - combo_since[0] >= 2:
+                combo_since[0] = None
+                go_home()
+        else:
+            combo_since[0] = None
         root.after(250, keepalive)
 
     def run_poll():
