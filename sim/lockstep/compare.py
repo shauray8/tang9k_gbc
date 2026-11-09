@@ -8,11 +8,15 @@ SameBoy blanks (or repeats) the first frame after LCD on like hardware, our core
 A frames (SameBoy pushes one when the LCD is switched on, to pace its frontend) are dropped.
 
   compare.py run <rom> <schedule> <frames> <outdir>   run both emulators, then compare
-  compare.py diff <ours.hash> <sameboy.hash> [--rom R --schedule S --outdir D [--our-init]]
+  compare.py diff <ours.hash> <sameboy.hash> [--rom R --schedule S --outdir D --variant V]
 
-`run` builds nothing: call sim/lockstep/build.sh first. It writes ours.hash, sb.hash (boot ROM
-handoff) and sb-ourinit.hash (SameBoy forced to our reset state) and compares both pairs.
+`run` builds nothing: call sim/lockstep/build.sh first. It writes ours.hash (reused if present,
+LOCKSTEP_RERUN=1 forces a new run) and one SameBoy hash per VARIANTS entry, compares each, and
+for the first divergent frame writes <variant>-first-{ours,sameboy,diff}.png plus report-<variant>.txt.
+Reports: constant-offset comparison, rendered-frames-only comparison, a sequence-aligned diff,
+and shifts of the per-frame tick delta (CPU-side timing differences surfacing at LCD restarts).
 """
+import difflib
 import os
 import struct
 import subprocess
@@ -60,11 +64,22 @@ def best_offset(ours, sb, window=3, span=300):
     best = None
     for d in range(-window, window + 1):
         score = sum(1 for i in range(min(span, len(ours)))
-                    if 0 <= i + d < len(sb) and ours[i][4] == sb[i + d][4])
+                    if 0 <= i + d < len(sb) and ours[i][3:] == sb[i + d][3:])
         key = (score, -abs(d))
         if best is None or key > best[0]:
             best = (key, d)
     return best[1], best[0][0]
+
+
+def token(r):
+    return 'F' if r[3] in ('F', 'R') else r[3] + r[4]
+
+
+def aligned(ours, sb):
+    """Sequence alignment of the two frame streams (inserted/missing LCD-off frames don't
+    desynchronise everything after them). Returns the non-equal opcodes."""
+    sm = difflib.SequenceMatcher(None, [token(r) for r in ours], [token(r) for r in sb], autojunk=False)
+    return [op for op in sm.get_opcodes() if op[0] != 'equal']
 
 
 def compare(ours, sb):
@@ -98,6 +113,8 @@ def compare(ours, sb):
     rfirst = next(((o, s) for o, s in rp if o[4] != s[4]), None)
     res['rendered'] = {'offset': rd, 'pairs': len(rp), 'match': sum(o[4] == s[4] for o, s in rp),
                        'first': rfirst}
+    res['aligned'] = aligned(ours, sb)
+    res['ours'], res['sb'] = ours, sb
     return res
 
 
@@ -123,7 +140,29 @@ def report(name, res):
     out.append(f'rendered-only: offset {r["offset"]:+d}, {r["pairs"]} frames, {r["match"]} match'
                + (f', first mismatch ours {fmt_row(r["first"][0])} vs sameboy {fmt_row(r["first"][1])}'
                   if r['first'] else ', identical'))
+    ops = res['aligned']
+    only_o = sum(i2 - i1 for t, i1, i2, j1, j2 in ops if t == 'delete')
+    only_s = sum(j2 - j1 for t, i1, i2, j1, j2 in ops if t == 'insert')
+    repl = sum(i2 - i1 for t, i1, i2, j1, j2 in ops if t == 'replace')
+    out.append(f'aligned diff: {len(ops)} differing blocks; {repl} ours frames differ, {only_o} only in ours, '
+               f'{only_s} only in sameboy')
+    for t, i1, i2, j1, j2 in ops[:4]:
+        o = res['ours'][i1:i2]
+        s = res['sb'][j1:j2]
+        desc = lambda rs: (f'{len(rs)} frames {"".join(r[3] for r in rs[:12])}{"..." if len(rs) > 12 else ""} '
+                           f'from {fmt_row(rs[0])}' if rs else 'none')
+        out.append(f'  {t}: ours {desc(o)} | sameboy {desc(s)}')
     return '\n'.join(out)
+
+
+def first_divergence(res):
+    """First position-paired rows of a differing aligned block that are both comparable (N/O)."""
+    for t, i1, i2, j1, j2 in res['aligned']:
+        if t == 'replace':
+            for o, s in zip(res['ours'][i1:i2], res['sb'][j1:j2]):
+                if o[3] in COMPARABLE and s[3] in COMPARABLE:
+                    return o, s
+    return None
 
 
 def read_ppm(path):
@@ -149,30 +188,39 @@ def write_png(path, pixels, w=160, h=144):
 WHITE = [(255, 255, 255)] * (160 * 144)
 
 
-def dump_frames(o, s, rom, schedule, outdir, our_init):
+# SameBoy runs compared against the same ours.hash
+VARIANTS = {
+    'sb': ([], 'sameboy boot ROM handoff'),
+    'sb-ourinit': (['--our-init'], 'sameboy forced to our reset state'),
+    'sb-ourinit-ss2050': (['--our-init', '--speed-switch-mcycles', '2050'],
+                          'our reset state + our 2050 M-cycle speed-switch stall'),
+}
+
+
+def dump_frames(o, s, rom, schedule, outdir, variant):
     """Re-runs both emulators up to the mismatching event and writes PNGs plus a diff summary."""
     env = dict(os.environ, GB_PRESS=SCHEDULES[schedule])
-    tag = 'ourinit-' if our_init else ''
-    op, sp = os.path.join(outdir, f'{tag}first-ours.ppm'), os.path.join(outdir, f'{tag}first-sameboy.ppm')
+    op, sp = os.path.join(outdir, f'ours-event{o[0]}.ppm'), os.path.join(outdir, f'{variant}-first.ppm')
     if s[3] == 'O':
         sim = WHITE
     else:
         frames = s[2] // 70224 + 2
-        subprocess.run([SAMEBOY] + (['--our-init'] if our_init else []) + ['--dump', f'{s[0]}:{sp}', BOOT, rom,
-                       str(frames), os.devnull], env=env, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([SAMEBOY] + VARIANTS[variant][0] + ['--dump', f'{s[0]}:{sp}', BOOT, rom, str(frames),
+                       os.devnull], env=env, check=True, stdout=subprocess.DEVNULL)
         sim = read_ppm(sp)
     if o[3] == 'O':
         ours = WHITE
     else:
-        if not os.path.exists(op):  # identical for both pairings; the rerun is slow
+        if not os.path.exists(op):  # shared between variants; the rerun is slow
             frames = o[2] // 70224 + 2
             subprocess.run([VGB, rom, str(frames), os.path.join(outdir, 'last-ours.ppm')],
-                           env=dict(env, GB_FRAME_DUMP=f'{o[0]}:{op}'), check=True, stdout=subprocess.DEVNULL)
+                           env=dict(env, GB_FRAME_DUMP=f'{o[0]}:{op}'), check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
         ours = read_ppm(op)
-    write_png(os.path.join(outdir, f'{tag}first-ours.png'), ours)
-    write_png(os.path.join(outdir, f'{tag}first-sameboy.png'), sim)
+    write_png(os.path.join(outdir, f'{variant}-first-ours.png'), ours)
+    write_png(os.path.join(outdir, f'{variant}-first-sameboy.png'), sim)
     diff = [i for i in range(160 * 144) if ours[i] != sim[i]]
-    write_png(os.path.join(outdir, f'{tag}first-diff.png'),
+    write_png(os.path.join(outdir, f'{variant}-first-diff.png'),
               [(255, 0, 0) if ours[i] != sim[i] else tuple(c // 3 for c in ours[i]) for i in range(160 * 144)])
     if not diff:
         return 'frame images identical (hash difference outside the image?)'
@@ -186,27 +234,30 @@ def dump_frames(o, s, rom, schedule, outdir, our_init):
 def run(rom, schedule, frames, outdir):
     os.makedirs(outdir, exist_ok=True)
     env = dict(os.environ, GB_PRESS=SCHEDULES[schedule])
-    paths = {k: os.path.join(outdir, k + '.hash') for k in ('ours', 'sb', 'sb-ourinit')}
-    for key, extra in (('sb', []), ('sb-ourinit', ['--our-init'])):
+    ours = os.path.join(outdir, 'ours.hash')
+    for key, (extra, _) in VARIANTS.items():
         with open(os.path.join(outdir, key + '.log'), 'w') as log:
-            subprocess.run([SAMEBOY] + extra + [BOOT, rom, str(frames), paths[key]], env=env, check=True, stdout=log)
-    if not os.path.exists(paths['ours']) or os.environ.get('LOCKSTEP_RERUN'):
+            subprocess.run([SAMEBOY] + extra + [BOOT, rom, str(frames), os.path.join(outdir, key + '.hash')],
+                           env=env, check=True, stdout=log)
+    if not os.path.exists(ours) or os.environ.get('LOCKSTEP_RERUN'):
         with open(os.path.join(outdir, 'ours.log'), 'w') as log:
             subprocess.run([VGB, rom, str(frames), os.path.join(outdir, 'last-ours.ppm')],
-                           env=dict(env, GB_FRAME_HASH=paths['ours']), check=True, stdout=log, stderr=log)
-    diff_cmd(paths['ours'], paths['sb'], rom, schedule, outdir, False)
-    diff_cmd(paths['ours'], paths['sb-ourinit'], rom, schedule, outdir, True)
+                           env=dict(env, GB_FRAME_HASH=ours), check=True, stdout=log, stderr=log)
+    for key in VARIANTS:
+        diff_cmd(ours, os.path.join(outdir, key + '.hash'), rom, schedule, outdir, key)
 
 
-def diff_cmd(ours_path, sb_path, rom=None, schedule='none', outdir=None, our_init=False):
+def diff_cmd(ours_path, sb_path, rom=None, schedule='none', outdir=None, variant='sb'):
     res = compare(load(ours_path), load(sb_path))
-    text = report(f'{os.path.basename(rom or ours_path)} schedule={schedule} '
-                  f'{"sameboy forced to our reset state" if our_init else "sameboy boot ROM handoff"}', res)
-    if res['first'] and rom and outdir:
-        text += '\nfirst mismatch frames: ' + dump_frames(*res['first'], rom, schedule, outdir, our_init)
+    text = report(f'{os.path.basename(rom or ours_path)} schedule={schedule} {VARIANTS[variant][1]}', res)
+    target = first_divergence(res) or res['first']
+    if target and rom and outdir:
+        o, s = target
+        text += (f'\nfirst divergence dumped (ours event {o[0]} vs sameboy event {s[0]}): '
+                 + dump_frames(o, s, rom, schedule, outdir, variant))
     print(text, flush=True)
     if outdir:
-        with open(os.path.join(outdir, 'report-ourinit.txt' if our_init else 'report.txt'), 'w') as f:
+        with open(os.path.join(outdir, f'report-{variant}.txt'), 'w') as f:
             f.write(text + '\n')
 
 
@@ -214,10 +265,9 @@ def main(argv):
     if len(argv) >= 5 and argv[0] == 'run':
         run(os.path.abspath(argv[1]), argv[2], int(argv[3]), os.path.abspath(argv[4]))
     elif len(argv) >= 3 and argv[0] == 'diff':
-        rest = [a for a in argv[3:] if a != '--our-init']
-        opts = dict(zip(rest[::2], rest[1::2]))
+        opts = dict(zip(argv[3::2], argv[4::2]))
         diff_cmd(argv[1], argv[2], opts.get('--rom'), opts.get('--schedule', 'none'), opts.get('--outdir'),
-                 '--our-init' in argv[3:])
+                 opts.get('--variant', 'sb'))
     else:
         print(__doc__)
         return 2

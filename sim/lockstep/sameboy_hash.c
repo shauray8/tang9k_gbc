@@ -1,11 +1,14 @@
 // SameBoy reference run producing the same per-frame hash stream as sim/tb.cpp's GB_FRAME_HASH.
-// usage: sameboy_hash [--our-init] [--dump N:out.ppm]... <cgb_boot.bin> <rom.gbc> <frames> <out.hash>
+// usage: sameboy_hash [--our-init] [--speed-switch-mcycles N] [--dump N:out.ppm]... <cgb_boot.bin> <rom.gbc>
+//        <frames> <out.hash>
 //   Runs the CGB boot ROM (CGB-E), then counts from the handoff to 0x0100: <frames> * 70224 dots.
 //   GB_PRESS="from:to:mask,..." as in tb.cpp, keyed to LCD-on LY 153->0 transitions (our vsync).
 //   Hash lines "event vsyncs ticks kind fnv1a64": N rendered frame, F first frame after LCD on (SameBoy
 //   shows white), R repeat (CGB keeps the previous frame), O LCD-off white frame, A artificial.
 //   --our-init: at the handoff overwrite CPU registers, internal DIV, IE/IF, WRAM/HRAM/VRAM/OAM with
 //   the FPGA core's reset state and restart the PPU at LY 0 by toggling LCDC.7.
+//   --speed-switch-mcycles N: shorten SameBoy's post-STOP speed-switch stall (0x20000 8 MHz ticks) to
+//   N M-cycles of the new speed, as our core does (gb.v speed_wait, 2050), to look past that difference.
 #define GB_INTERNAL
 #include <Core/gb.h>
 #include <Core/random.h>
@@ -92,9 +95,11 @@ static void print_state(GB_gameboy_t *gb, const char *tag)
 int main(int argc, char **argv)
 {
     bool our_init = false;
+    long switch_mcycles = -1;
     int argi = 1;
     for (; argi < argc && argv[argi][0] == '-' && argv[argi][1] == '-'; argi++) {
         if (!strcmp(argv[argi], "--our-init")) our_init = true;
+        else if (!strcmp(argv[argi], "--speed-switch-mcycles") && argi + 1 < argc) switch_mcycles = atol(argv[++argi]);
         else if (!strcmp(argv[argi], "--dump") && argi + 1 < argc && ndumps < 16) {
             char *colon = strchr(argv[++argi], ':');
             if (!colon) { fprintf(stderr, "--dump N:path\n"); return 2; }
@@ -104,7 +109,8 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "unknown option %s\n", argv[argi]); return 2; }
     }
     if (argc - argi != 4) {
-        fprintf(stderr, "usage: sameboy_hash [--our-init] [--dump N:out.ppm]... boot.bin rom.gbc frames out.hash\n");
+        fprintf(stderr, "usage: sameboy_hash [--our-init] [--speed-switch-mcycles N] [--dump N:out.ppm]... "
+                        "boot.bin rom.gbc frames out.hash\n");
         return 2;
     }
     const char *boot = argv[argi], *rom = argv[argi + 1], *out = argv[argi + 3];
@@ -154,7 +160,16 @@ int main(int argc, char **argv)
     started = true;
     unsigned prev_line = gb->current_line;
     while (ticks8 < 2 * max_ticks) {
+        int32_t stall_before = gb->speed_switch_halt_countdown;
+        bool was_double = gb->cgb_double_speed;
         ticks8 += GB_run(gb);
+        if (switch_mcycles >= 0 && gb->speed_switch_halt_countdown > stall_before) {
+            // STOP just armed the stall at 0x20008 (minus what already elapsed in this GB_run). The -4
+            // lines the first post-switch fetch up with our core (traced on Link's Awakening DX).
+            int32_t elapsed = 0x20008 - gb->speed_switch_halt_countdown;
+            int32_t want = switch_mcycles * (was_double ? 8 : 4) - 4 - elapsed;
+            gb->speed_switch_halt_countdown = want > 0 ? want : 1;
+        }
         unsigned line = gb->current_line;
         if (prev_line == 153 && line == 0 && (gb->io_registers[GB_IO_LCDC] & 0x80)) {
             vsyncs++;
