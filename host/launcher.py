@@ -68,6 +68,7 @@ class Library:
     AUTOSAVE_QUIET = 3        # seconds after the first observed cart-RAM write
     AUTOSAVE_INTERVAL = 60    # minimum seconds between in-game autosaves (each pauses play)
     GAME_POLL = 0.25          # in-game status query: overlay actions and cart-RAM writes
+    MENU_POLL = 0.5           # card-wall status query: an overlay opened there (S2) is closed
 
     def __init__(self, link, folder, covers=None):
         self.link, self.folder, self.covers = link, Path(folder), covers
@@ -88,6 +89,7 @@ class Library:
         self.last_save = 0.0
         self.dirty_since = None
         self.next_poll = 0.0
+        self.next_menu_poll = 0.0
 
     @property
     def busy(self):
@@ -229,8 +231,20 @@ class Library:
             return None
         if not self.active:
             return self._in_game()
-        events = self.decoder.feed(self.link.read(.005))
+        data = bytearray(self.link.read(.005))
+        overlay = False
+        if time.monotonic() >= self.next_menu_poll:
+            # The overlay pauses the menu too (S2 on the board): reloading the menu closes it.
+            self.next_menu_poll = time.monotonic() + self.MENU_POLL
+            try:
+                overlay = gbctl.core_flags(self.link, spill=data.extend) & 0xF0 != 0
+            except gbctl.TransferError:
+                pass
+        events = self.decoder.feed(bytes(data))
         if not events:
+            if overlay:
+                print('Overlay opened on the library: reloading the menu', flush=True)
+                return self.home()
             return None
         index = events[0]
         if index >= len(self.games):

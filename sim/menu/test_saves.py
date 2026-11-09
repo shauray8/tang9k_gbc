@@ -26,6 +26,7 @@ class FakeFPGA:
         self.frozen = False
         self.dirty = False
         self.overlay_event = 0         # pending in-game overlay request (rtl/overlay.v)
+        self.overlay_open = False
         self.clock = (0, 0, 0, 0, 0)
         self.rom_left = None
         self.rom_sum = 0
@@ -95,7 +96,8 @@ class FakeFPGA:
                     self.frozen = False
                 elif cmd[1] == 5:
                     self.overlay_event = 0
-                self.out += b'p' + bytes((self.overlay_event << 5 | self.dirty << 1 | self.frozen,))
+                self.out += b'p' + bytes((self.overlay_event << 5 | self.overlay_open << 4
+                                          | self.dirty << 1 | self.frozen,))
             elif op in b'AB' and self.frozen:
                 addr = cmd[1] << 16 | cmd[2] << 8 | cmd[3]
                 n = (cmd[4] << 8 | cmd[5]) or 0x10000
@@ -249,6 +251,21 @@ class SaveTests(unittest.TestCase):
             self.assertEqual(self.fpga.overlay_event, 0)
         finally:
             launcher.gbctl.boot_preference = before
+
+    def test_overlay_on_the_card_wall_reloads_the_menu_but_never_eats_a_launch(self):
+        self.service.MENU_POLL = 0
+        self.fpga.overlay_open = True
+        loads = len(self.fpga.loads)
+        self.service.poll()
+        self.finish()
+        self.assertEqual(len(self.fpga.loads), loads + 1, 'menu not reloaded')
+        self.assertTrue(self.service.active)
+        self.fpga.overlay_open = False
+        index = [g.path.name for g in self.service.games].index('Alpha.gbc')
+        self.fpga.select(index)                                # 'G' arrives with the status query
+        self.service.poll()
+        self.finish()
+        self.assertEqual(self.service.current.rom.name, 'Alpha.gbc')
 
     def test_controls_blocked_until_upload_completion_consumed(self):
         self.fpga.load_gate = threading.Event()

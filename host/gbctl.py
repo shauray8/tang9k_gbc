@@ -294,17 +294,22 @@ class TransferError(RuntimeError):
     pass
 
 
-def core_flags(link, state=2):
+def core_flags(link, state=2, spill=None):
     """'P' <state> -> the raw 'p' flags byte: {overlay event[2:0], overlay open, 0, boot logo,
     dirty cart RAM since the last freeze, frozen}. States: 0 resume, 1 freeze, 2 query,
-    3/4 boot logo on/off, 5 acknowledge the overlay event."""
+    3/4 boot logo on/off, 5 acknowledge the overlay event. Other bytes that arrive meanwhile
+    (e.g. the launcher menu's 'G' request) go to spill(bytes) instead of being dropped."""
     for _ in range(3):
-        link.read(0.02)
+        stray = link.read(0.02)
         link.write(bytes((ord("P"), state)))
         reply = link.read(0.5, lambda d: len(d) >= 2 and d[-2:-1] == b"p")
         k = reply.rfind(b"p")
         if k >= 0 and k + 1 < len(reply):
+            if spill is not None and (stray or k or k + 2 < len(reply)):
+                spill(stray + reply[:k] + reply[k + 2:])
             return reply[k + 1]
+        if spill is not None and (stray or reply):
+            spill(stray + reply)
     raise TransferError("no reply to freeze/resume; is the save-capable design loaded?")
 
 
