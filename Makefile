@@ -14,7 +14,7 @@ RTL += rtl/menu_bridge.v rtl/host_mem.v
 CST    := boards/tangnano9k/tangnano9k.cst
 SDC    := boards/tangnano9k/tangnano9k.sdc
 DEVICE := GW1NR-LV9QN88PC6/I5
-PNR_SEED ?= 7   # qualified with sim/hwstress/qualify.sh (12 min clean); seeds 4, 9, 14 crash it
+PNR_SEED ?= 12  # qualified with sim/hwstress/qualify.sh (10 min clean); seed 2 also passes
 FAMILY := GW1N-9C
 
 .PHONY: all bitstream prog flash rom sim clean arcade

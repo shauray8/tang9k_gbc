@@ -1,7 +1,9 @@
 // Byte request bridge from the 27 MHz system domain to the memory fabric.
 // Request and acknowledgement toggles cross through synchronizers; payloads are held stable.
-// Read data is sampled continuously, then sampled again by the CPU's din_r register.
-// The fixed CPU deadline, rather than acknowledgement latency, determines when it may be used.
+// Read data is the fabric-domain capture register itself; system-domain consumers (the CPU's
+// din_r, DMA writes into VRAM/OAM) sample it at a fixed deadline, so it only has to settle one
+// system clock before that deadline. A second system-domain register here would add 37 ns to
+// every read without making that sample any safer.
 // Requests wait through controller recovery even when the previous response returned early.
 module psram_bridge #(parameter FREQ = 81_000_000) (
     // system domain
@@ -11,7 +13,7 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     input             we,
     input      [21:0] addr,
     input      [7:0]  wd,
-    output reg [7:0]  rd,           // synchronized read data; stable by the verified bus deadline
+    output     [7:0]  rd,           // read data; settled >= 1 system clock before the bus deadline
     output            busy,
     output            ready,        // PSRAM initialised
     output reg        hang,         // sticky: a request never completed (diagnostics)
@@ -33,6 +35,7 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     reg [2:0] ak_s;
     reg [1:0] rdy_s;
     wire [7:0] m_data;
+    assign rd = m_data;
     wire [15:0] c_dout;
     reg ak_t;
     reg m_ready;
@@ -40,12 +43,11 @@ module psram_bridge #(parameter FREQ = 81_000_000) (
     assign ready = rdy_s[1];
     reg [11:0] pend_cnt;          // diagnostics: a request outstanding > 4096 clk (~160 us) never completes
     always @(posedge clk) begin
-        rd <= m_data;
         ak_s <= {ak_s[1:0], ak_t};
         rdy_s <= {rdy_s[0], m_ready};
         if (rst) begin
             rq_t <= 0; pend <= 0; hang <= 0; pend_cnt <= 0;
-            rd <= 0; dbg_word <= 0; dbg_lat <= 0; ak_s <= 0; rdy_s <= 0;
+            dbg_word <= 0; dbg_lat <= 0; ak_s <= 0; rdy_s <= 0;
         end
         else begin
             pend_cnt <= pend ? pend_cnt + (pend_cnt != 12'hFFF) : 12'd0;
