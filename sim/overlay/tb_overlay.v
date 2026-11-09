@@ -64,10 +64,13 @@ module tb;
         press(DOWN); if (sel != 0) $fatal(1, "down from COLOUR should wrap to RESUME");
         // SAVE: event 1, overlay closes.
         press(DOWN); press(A); expect_event(8'd1); if (on) $fatal(1, "SAVE should close");
-        // LIBRARY: event 2, stays open (the host loads the menu, which closes it).
+        // LIBRARY: event 2, closes (no waiting on the host).
         pulse_open; press(DOWN); press(DOWN); press(START); expect_event(8'd2);
-        if (!on) $fatal(1, "LIBRARY should stay open until the reload");
-        close_all = 1; @(negedge clk) close_all = 0; if (on) $fatal(1, "reload must close it");
+        if (on) $fatal(1, "LIBRARY should close");
+        // A (re)load closes an open overlay and drops an unanswered request.
+        pulse_open; press(DOWN); press(A); if (!ev_valid) $fatal(1, "no SAVE request");
+        pulse_open; close_all = 1; @(negedge clk) close_all = 0;
+        if (on || ev_valid) $fatal(1, "reload must close it and clear the request: on=%b ev=%b", on, ev_valid);
         // RESET: one pulse, closes, event 3.
         pulse_open; press(UP); press(UP); press(UP); if (sel != 3) $fatal(1, "sel %0d, want RESET", sel);
         press(A); expect_event(8'd3);

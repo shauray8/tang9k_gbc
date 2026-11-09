@@ -16,7 +16,7 @@ RTL += rtl/menu_bridge.v rtl/host_mem.v rtl/overlay.v
 CST    := boards/tangnano9k/tangnano9k.cst
 SDC    := boards/tangnano9k/tangnano9k.sdc
 DEVICE := GW1NR-LV9QN88PC6/I5
-PNR_SEED ?= 12  # `make release` with the overlay: qualified with sim/hwstress/qualify.sh (seed 5 fails it); debug builds need their own run
+PNR_SEED ?= 14  # `make release`: qualified with sim/hwstress/qualify.sh (seed 28 fails it); debug builds need their own run
 FAMILY := GW1N-9C
 
 .PHONY: all bitstream release prog flash rom sim clean arcade

@@ -135,14 +135,15 @@ module top (
     wire ld_m_req; wire [21:0] ld_m_addr; wire [7:0] ld_m_wd;
     wire hm_busy;                 // host transfer owns the UART byte stream
     wire u_start = u_v && !hm_busy && us == S_CMD && u_d == "L";
-    wire core_ser_valid, menu_pending;
+    wire core_ser_valid, menu_pending, menu_running;
     wire [7:0] core_ser_data;
     wire [15:0] menu_index;
     wire menu_arm = u_v && !hm_busy && us == S_CMD && u_d == "M" && tq == 0;
     menu_bridge menu_requests (
         .clk(clk_sys), .rst(rst || btn_sync[15]), .arm(menu_arm), .disarm(u_start || fl_start),
         .ser_valid(core_ser_valid), .ser_data(core_ser_data),
-        .take(tq_s == 5 && tq == 1 && tx_rdy), .pending(menu_pending), .index(menu_index)
+        .take(tq_s == 5 && tq == 1 && tx_rdy), .pending(menu_pending), .index(menu_index),
+        .armed(menu_running)
     );
     wire [1:0] cart_type; wire [8:0] rom_mask; wire [3:0] ram_mask; wire [7:0] lsum;
     wire cgb_mode, cart_rtc, cart_ram, cart_mbc2;
@@ -312,7 +313,7 @@ module top (
     // (host 'P' 3/4, overlay toggle); boot_run is what the running game was started with.
     reg boot_run;
     overlay_ctl overlay (
-        .clk(clk_sys), .rst(rst), .enable(vst == 3'd5 && test_pass),
+        .clk(clk_sys), .rst(rst), .enable(vst == 3'd5 && test_pass && !menu_running),
         .open(host_open || (btn_sync[14] && !s2_d)), .close_all(u_start || fl_start),
         .pad(jb), .cart_cgb(cgb_mode), .boot_active(boot_active), .boot_run(boot_run), .boot_en(boot_en),
         .on(ov_on), .sel(ov_sel), .pal(ov_pal), .core_reset(ov_reset), .boot_toggle(ov_boot_toggle),

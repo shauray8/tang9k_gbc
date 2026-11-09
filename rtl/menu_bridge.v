@@ -10,9 +10,9 @@ module menu_bridge (
     input [7:0] ser_data,
     input take,
     output reg pending,
-    output reg [15:0] index
+    output reg [15:0] index,
+    output reg armed            // the launcher menu is running (armed by 'M' after its load)
 );
-    reg armed;
     reg [1:0] step;
     always @(posedge clk) begin
         if (rst || disarm) begin

@@ -3,7 +3,8 @@
 // overlay_ctl (system domain): S2 or the host's 'O' command opens it while a game runs. The
 // core is held (CPU, timer, DMA; the PPU keeps the picture) and sees no buttons. Up/Down pick an
 // item, A/Start activates, B resumes:
-//   0 RESUME   1 SAVE (host saves, overlay closes)   2 LIBRARY (host saves and loads the menu)
+//   0 RESUME   1 SAVE (host saves, overlay closes)   2 LIBRARY (overlay closes; the host freezes,
+//     saves and loads the menu, so nothing waits on a host that is absent or busy)
 //   3 RESET (core reset; cart RAM and the loaded ROM stay)   4 BOOT LOGO on/off (next reset/load)
 //   5 COLOUR: AUTO or SameBoy boot ROM palette 1-16 for original-GB carts. The boot ROM reads
 //     its key combination while the logo runs, so the chosen combination is held on the core's
@@ -17,7 +18,7 @@
 module overlay_ctl (
     input             clk,
     input             rst,
-    input             enable,       // a game is loaded and running
+    input             enable,       // a game (not the launcher menu) is loaded and running
     input             open,         // 1-clk pulse
     input             close_all,    // game (re)load
     input      [7:0]  pad,          // active high {start,select,b,a,down,up,left,right}
@@ -72,7 +73,7 @@ module overlay_ctl (
             if (act) case (sel)
                 3'd0: on <= 0;
                 3'd1: begin on <= 0; event_out(8'd1); end
-                3'd2: event_out(8'd2);
+                3'd2: begin on <= 0; event_out(8'd2); end
                 3'd3: begin on <= 0; core_reset <= 1; event_out(8'd3); end
                 default: ;
             endcase
