@@ -61,7 +61,7 @@ def library(folder):
             reason = 'EXCEEDS ROM LIMIT'
         elif header[0x148] > 7 or size != 0x8000 << header[0x148]:
             reason = 'INVALID ROM SIZE'
-        elif header[0x147] not in (0, 1, 2, 3, 15, 16, 17, 18, 19, 25, 26, 27, 28, 29, 30):
+        elif header[0x147] not in (0, 1, 2, 3, 5, 6, 15, 16, 17, 18, 19, 25, 26, 27, 28, 29, 30):
             reason = 'MAPPER NOT SUPPORTED'
         title = re.sub(r'\([^)]*\)|\[[^]]*\]', '', path.stem).strip().upper()
         title = re.sub(r'\s+', ' ', title)

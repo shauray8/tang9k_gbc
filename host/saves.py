@@ -14,7 +14,7 @@ import time
 
 RAM_BASE = 0x3E0000
 RAM_BYTES = {0: 0, 1: 0x800, 2: 0x2000, 3: 0x8000, 4: 0x20000, 5: 0x10000}
-BATTERY = {0x03, 0x0F, 0x10, 0x13, 0x1B, 0x1E}
+BATTERY = {0x03, 0x06, 0x0F, 0x10, 0x13, 0x1B, 0x1E}
 CLOCK = {0x0F, 0x10}
 FRESH_RAM = 0xFF
 
@@ -40,7 +40,7 @@ def cartridge(rom):
     with rom.open('rb') as f:
         header = f.read(0x150)
     kind, size = header[0x147], header[0x149]
-    ram = RAM_BYTES.get(size, 0)
+    ram = 0x200 if kind in (0x05, 0x06) else RAM_BYTES.get(size, 0)   # MBC2: 512 x 4-bit built in
     return Cartridge(rom, ram, kind in BATTERY, kind in CLOCK)
 
 

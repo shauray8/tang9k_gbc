@@ -135,7 +135,7 @@ module top (
         .take(tq_s == 5 && tq == 1 && tx_rdy), .pending(menu_pending), .index(menu_index)
     );
     wire [1:0] cart_type; wire [8:0] rom_mask; wire [3:0] ram_mask; wire [7:0] lsum;
-    wire cgb_mode, cart_rtc, cart_ram;
+    wire cgb_mode, cart_rtc, cart_ram, cart_mbc2;
     // Freeze gates the core's clock enables. Resume first reissues the held bus access,
     // then waits until its reply is valid before the core advances again.
     reg freeze, dirty;
@@ -243,6 +243,7 @@ module top (
         .full(ld_full), .done(ld_done),
         .m_req(ld_m_req), .m_addr(ld_m_addr), .m_wd(ld_m_wd), .m_busy(b_busy),
         .cgb_mode(cgb_mode), .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
+        .cart_mbc2(cart_mbc2),
         .rom_mask(rom_mask), .ram_mask(ram_mask), .sum(lsum)
     );
 
@@ -275,7 +276,7 @@ module top (
         .cgb_mode(cgb_mode),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
         .lcd_on(lcd_on),
-        .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
+        .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram), .cart_mbc2(cart_mbc2),
         .rom_mask(rom_mask), .ram_mask(ram_mask),
         .ext_addr(g_addr), .ext_req(g_req), .ext_we(g_we), .ext_wd(g_wd), .ext_rd(b_rd),
         .bus_resume(bus_resume), .rtc_host_load(rtc_load), .rtc_host_d(rtc_d), .rtc_live(rtc_live),

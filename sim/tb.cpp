@@ -27,7 +27,8 @@ int main(int argc, char **argv) {
     size_t rom_len = fread(ext.data(), 1, 0x3E0000, rf);
     fclose(rf);
     int type = ext[0x147];
-    int cart = (type >= 1 && type <= 3) ? 1 : (type >= 0x0F && type <= 0x13) ? 2 : (type >= 0x19 && type <= 0x1E) ? 3 : 0;
+    const bool mbc2 = type == 0x05 || type == 0x06;
+    int cart = (type >= 1 && type <= 3) || mbc2 ? 1 : (type >= 0x0F && type <= 0x13) ? 2 : (type >= 0x19 && type <= 0x1E) ? 3 : 0;
     int banks = 2 << ext[0x148];
     static const int ram_banks[6] = {0, 1, 1, 4, 16, 8};
     int rb = ext[0x149] < 6 ? ram_banks[ext[0x149]] : 1;
@@ -36,7 +37,8 @@ int main(int argc, char **argv) {
     Vgb *g = new Vgb;
     g->cart_type = cart; g->rom_mask = banks - 1; g->ram_mask = rb ? rb - 1 : 0;
     g->cart_rtc = type == 0x0F || type == 0x10;
-    g->cart_ram = rb != 0;
+    g->cart_mbc2 = mbc2;
+    g->cart_ram = rb != 0 || mbc2;
     g->cgb_mode = (ext[0x143] & 0x80) != 0;
     static unsigned short fb[144][160];
     memset(fb, 0, sizeof fb);
