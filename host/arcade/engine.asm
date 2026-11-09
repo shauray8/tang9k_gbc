@@ -1,7 +1,8 @@
 ; Tang gallery: the FPGA's game launcher, itself a small GBC game.
-; A wall of pinned game cards, six per page (GTA 2 character-select style): the selected
-; card is in full colour with a white frame, the others are dimmed. Left/right cycle through
-; the cards and pages, up/down change rows, A or Start launches.
+; A wall of pinned game cards, seven per page (GTA 2 character-select style): three up,
+; four down, at uneven heights. The selected card is in full colour with a white frame,
+; the others are dimmed. Left/right cycle through the cards and pages, up/down change rows,
+; A or Start launches.
 ; host/menu.py fills in graphics, palettes and the game records; this file is only the
 ; engine. Rebuild engine.bin with `make arcade` after editing.
 
@@ -25,35 +26,39 @@ DEF rDMA   EQU $FF46
 DEF rIE    EQU $FFFF
 
 ; ---- fixed layout shared with menu.py ----
-DEF FONT_TILES   EQU $2000   ; 96 font + 32 wall/banner tiles -> VRAM tiles 0-127
-DEF SPRITE_TILES EQU $2800   ; 8 frame tiles -> tile 128
-DEF BG_MAP       EQU $2900   ; 32x18 tile map
-DEF BG_ATTR      EQU $2B40   ; 32x18 attributes
-DEF BG_PALS      EQU $2D80   ; 8 palettes x 8 bytes (0 wall, 1-6 cards, 7 banner)
-DEF OBJ_PALS     EQU $2DC0
-DEF IDLE_TEXT    EQU $2E00   ; 2 x 20 banner rows when the library is empty
-DEF LOAD_TEXT    EQU $2E40   ; banner second row while loading
-DEF BLANK_RECORD EQU $3000   ; record shown for empty card slots
+DEF FONT_TILES   EQU $2000   ; 96 heading font, 96 banner font, 32 wall tiles -> tiles 0-223
+DEF SPRITE_TILES EQU $2E00   ; 8 frame tiles -> tile 224
+DEF BG_MAP       EQU $2E80   ; 32x18 tile map
+DEF BG_ATTR      EQU $30C0   ; 32x18 attributes
+DEF BG_PALS      EQU $3300   ; 8 palettes x 8 bytes (0 wall + banner, 1-7 cards)
+DEF OBJ_PALS     EQU $3340
+DEF IDLE_TEXT    EQU $3380   ; 2 x 20 banner rows when the library is empty
+DEF LOAD_TEXT    EQU $33C0   ; banner second row while loading
+DEF BLANK_RECORD EQU $3400   ; record shown for empty card slots
 DEF GAME_COUNT   EQU $3FF0   ; 16-bit
 DEF LAST_PAGE    EQU $3FF2   ; 16-bit index of the last page's first game
 
-; record layout (1024 bytes, banks 1+, 16 per bank)
-DEF R_PAL    EQU 480         ; after 30 tiles of 40x48 art (VRAM bank 1)
-DEF R_DIM    EQU 488
-DEF R_BANNER EQU 496         ; 2 x 20
-DEF R_PLAY   EQU 536
+DEF PAGE       EQU 7         ; cards per page: 0-2 top row, 3-6 bottom row
+DEF CARD_TILES EQU 20        ; 32x40 art, VRAM bank 1, tiles 20 * card
 
-DEF FRAME_TILE EQU 128       ; 8x16 sprites: top, bottom, left, right edge
+; record layout (512 bytes, banks 1+, 32 per bank)
+DEF R_PAL    EQU CARD_TILES * 16
+DEF R_DIM    EQU R_PAL + 8
+DEF R_BANNER EQU R_PAL + 16  ; 2 x 20, banner-font tile numbers
+DEF R_PLAY   EQU R_PAL + 56
+
+DEF FRAME_TILE EQU 224       ; 8x16 sprites: top, bottom, left, right edge
 
 ; ---- WRAM ----
 SECTION "shadow oam", WRAM0[$C000]
 wOAM: ds 160
 SECTION "state", WRAM0[$C100]
 wBase:    ds 2     ; index of this page's first game
-wSel:     ds 1     ; selected card 0-5
+wSel:     ds 1     ; selected card 0-6
 wOnPage:  ds 1     ; cards on this page
-wLoad:    ds 1     ; next card to load (one per frame), 6 = all loaded
-wPalDirty: ds 1
+wLoad:    ds 1     ; next card to load (one per frame), PAGE = all loaded
+wPalDirty: ds 1    ; bit n: card n's palette needs rewriting (VBlank only fits a few)
+wPalWork: ds 1
 wBannerDirty: ds 1
 wFrame:   ds 1
 wPad:     ds 1
@@ -87,6 +92,10 @@ Start:
     ld hl, FONT_TILES
     ld de, $8000
     ld c, 128
+    call Gdma
+    ld hl, FONT_TILES + 128 * 16
+    ld de, $8800
+    ld c, 96
     call Gdma
     ld hl, SPRITE_TILES
     ld de, $8000 + FRAME_TILE * 16
@@ -155,7 +164,7 @@ Start:
     pop bc
     inc c
     ld a, c
-    cp 6
+    cp PAGE
     jr nz, .first
     ld [wLoad], a
     call SetPalettes
@@ -169,7 +178,7 @@ MainLoop:
     call WaitVBlank
     call $FF80                 ; OAM DMA from wOAM
     ld a, [wLoad]
-    cp 6
+    cp PAGE
     jr nc, .loaded
     ld c, a
     inc a
@@ -178,10 +187,7 @@ MainLoop:
 .loaded:
     ld a, [wPalDirty]          ; palettes are not writable in mode 3
     or a
-    jr z, .nopal
-    xor a
-    ld [wPalDirty], a
-    call SetPalettes
+    call nz, SetPalettes
 .nopal:
     ld a, [wBannerDirty]
     or a
@@ -254,10 +260,9 @@ Record:
     or a
     jr z, .blank
 .valid:
-    ; bank = index / 16 + 1, pointer = $4000 + (index % 16) * 1024
+    ; bank = index / 32 + 1, pointer = $4000 + (index % 32) * 512
     ld a, l
-    and %00001111
-    add a
+    and %00011111
     add a
     add $40
     ld b, a                     ; high byte of the pointer
@@ -269,7 +274,9 @@ Record:
     srl h
     rra
     srl h
-    rra                         ; a = index / 16
+    rra
+    srl h
+    rra                         ; a = index / 32 (low 8 bits are enough for 4064 games)
     inc a
     ld [$2000], a
     xor a
@@ -281,7 +288,7 @@ Record:
     ld hl, BLANK_RECORD
     ret
 
-; l = card 0-5 -> hl = game index (wBase + card)
+; l = card 0-6 -> hl = game index (wBase + card)
 SlotIndex:
     ld h, 0
     ld a, [wBase]
@@ -292,8 +299,10 @@ SlotIndex:
     ld h, a
     ret
 
-; c = card: art tiles -> VRAM bank 1, tiles 30 * card
+; c = card: art tiles -> VRAM bank 1, tiles CARD_TILES * card
 LoadCard:
+    ld a, c
+    call MarkPal
     ld l, c
     push bc
     call SlotIndex
@@ -301,7 +310,7 @@ LoadCard:
     pop bc
     push hl
     ld hl, $8000
-    ld de, 30 * 16
+    ld de, CARD_TILES * 16
     ld a, c
     or a
     jr z, .dest
@@ -315,19 +324,42 @@ LoadCard:
     pop hl
     ld a, 1
     ldh [rVBK], a
-    ld c, 30
+    ld c, CARD_TILES
     call Gdma
     xor a
     ldh [rVBK], a
-    ld a, 1
-    ld [wPalDirty], a
     ret
 
-; BG palettes 1-6: selected card in colour (blinking while launching), others dimmed,
-; cards not loaded yet in the wall colour so stale art never shows
+; a = card: mark its palette for rewriting (keeps bc, de, hl)
+MarkPal:
+    push bc
+    ld b, a
+    inc b
+    ld a, %10000000
+.shift:
+    rlca
+    dec b
+    jr nz, .shift
+    ld b, a
+    ld a, [wPalDirty]
+    or b
+    ld [wPalDirty], a
+    pop bc
+    ret
+
+; BG palettes 1-7 of the marked cards: selected card in colour (blinking while launching),
+; others dimmed, cards not loaded yet in the wall colour so stale art never shows
 SetPalettes:
+    ld a, [wPalDirty]
+    ld [wPalWork], a
+    xor a
+    ld [wPalDirty], a
     ld c, 0
 .card:
+    ld a, [wPalWork]
+    rrca
+    ld [wPalWork], a
+    jr nc, .next
     ld a, c
     inc a
     add a
@@ -380,7 +412,7 @@ SetPalettes:
 .next:
     inc c
     ld a, c
-    cp 6
+    cp PAGE
     jr nz, .card
     ret
 
@@ -452,7 +484,7 @@ DEF PAD_LEFT  EQU 5
 DEF PAD_UP    EQU 6
 DEF PAD_DOWN  EQU 7
 
-; ---------------- cursor: cards 0-2 top row, 3-5 bottom row ----------------
+; ---------------- cursor: cards 0-2 top row, 3-6 bottom row ----------------
 UpdateCursor:
     ld a, [wLaunch]
     or a
@@ -474,6 +506,11 @@ UpdateCursor:
     cp 3
     ret c
     sub 3
+    ld e, a
+    ld d, 0
+    ld hl, UpTab
+    add hl, de
+    ld a, [hl]
     jr .set
 .right:
     ld a, [wSel]
@@ -498,7 +535,11 @@ UpdateCursor:
     ld a, [wSel]
     cp 3
     ret nc
-    add 3
+    ld e, a
+    ld d, 0
+    ld hl, DownTab
+    add hl, de
+    ld a, [hl]
     cp b
     jr c, .set
     ld a, b                     ; short bottom row: its last card
@@ -506,16 +547,20 @@ UpdateCursor:
     cp 3
     ret c
 .set:
+    push af
+    ld a, [wSel]
+    call MarkPal                ; the old card dims
+    pop af
     ld [wSel], a
+    call MarkPal                ; the new one lights up
     ld a, 1
-    ld [wPalDirty], a
     ld [wBannerDirty], a
     ret
 
 ; next page, wrapping after the last one; reloads only if the page changed
 NextPage:
     ld a, [wBase]
-    add 6
+    add PAGE
     ld l, a
     ld a, [wBase + 1]
     adc 0
@@ -556,13 +601,13 @@ CountPage:
     sbc d
     jr nz, .six
     ld a, l
-    cp 6
+    cp PAGE
     jr c, .store
 .six:
-    ld a, 6
+    ld a, PAGE
 .store:
     ld [wOnPage], a
-    ld a, 1
+    ld a, %01111111             ; whole page
     ld [wPalDirty], a
     ret
 
@@ -580,7 +625,7 @@ PrevPage:
     jr NextPage.set
 .back:
     ld a, l
-    sub 6
+    sub PAGE
     ld l, a
     ld a, h
     sbc 0
@@ -615,8 +660,8 @@ UpdateLaunch:
     ld [wBannerDirty], a
     ret
 .blinking:
-    ld a, 1
-    ld [wPalDirty], a
+    ld a, [wSel]
+    call MarkPal
     ld hl, wLaunch
     dec [hl]
     ret nz
@@ -670,7 +715,7 @@ UpdateSprites:
     ld a, FRAME_TILE
     call HEdge
     ld a, [wFy]                 ; bottom edge: two lines just below
-    add 64
+    add 56
     ld d, a
     ld a, FRAME_TILE + 2
     call HEdge
@@ -679,12 +724,12 @@ UpdateSprites:
     ld a, FRAME_TILE + 4
     call VEdge
     ld a, [wFx]
-    add 48
+    add 40
     ld e, a
     ld a, FRAME_TILE + 6
     jr VEdge
 .hide:
-    ld b, 18 * 4
+    ld b, 16 * 4
     xor a
 .z:
     ld [hl+], a
@@ -692,13 +737,13 @@ UpdateSprites:
     jr nz, .z
     ret
 
-; d = OAM y, a = tile: six sprites covering x-2 .. x+41
+; d = OAM y, a = tile: five sprites covering x-2 .. x+33
 HEdge:
     ld c, a
     ld a, [wFx]
     add 6
     ld e, a
-    ld b, 5
+    ld b, 4
 .l:
     ld a, c
     call Put
@@ -708,27 +753,29 @@ HEdge:
     dec b
     jr nz, .l
     ld a, [wFx]
-    add 42
+    add 34
     ld e, a
     ld a, c
     jr Put
 
-; e = OAM x, a = tile: three 8x16 sprites down the card's 48 lines
+; e = OAM x, a = tile: three 8x16 sprites down the card's 40 lines (the last overlaps)
 VEdge:
     ld c, a
     ld a, [wFy]
     add 16
     ld d, a
-    ld b, 3
-.l:
     ld a, c
     call Put
-    ld a, d
-    add 16
+    ld a, [wFy]
+    add 32
     ld d, a
-    dec b
-    jr nz, .l
-    ret
+    ld a, c
+    call Put
+    ld a, [wFy]
+    add 40
+    ld d, a
+    ld a, c
+    jr Put
 
 ; OAM entry at hl: y = d, x = e, tile = a, attributes 0
 Put:
@@ -743,5 +790,10 @@ Put:
 
 ; card positions (screen pixels, top-left), shared with menu.py's CARDS
 CardPos:
-    db 8, 16, 56, 16, 104, 16
-    db 16, 72, 64, 72, 112, 72
+    db 24, 16, 64, 24, 104, 16
+    db 8, 72, 40, 64, 80, 80, 120, 72
+; up from bottom card 3-6, down from top card 0-2 (nearest column)
+UpTab:
+    db 0, 0, 1, 2
+DownTab:
+    db 4, 5, 6
