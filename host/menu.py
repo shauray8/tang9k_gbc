@@ -1,14 +1,23 @@
 """Build the FPGA's GBC launcher ROM from a Mac-backed game library.
 
-The launcher uses the existing SM83, colour PPU and GDMA. No second renderer.
-Optional covers: <ROM stem>.json or <lowercase-title-slug>.json, with four
-#RRGGBB palette entries and 48 rows of 32 pixel indices using 0..3.
-Artwork is original procedural pixel art when no cover is supplied.
+The launcher (host/arcade/engine.asm) is a GTA 2-style wall of game cards, six per page,
+running on the existing SM83, colour PPU and GDMA. No second renderer.
+
+Card art (40x48, four colours per card), first match wins:
+  1. your image beside the ROM with the same name: "Pokemon Crystal (USA).png" (or .jpg ...)
+  2. an image in the covers folder named after the ROM or the title slug ("pokemon-crystal.png")
+  3. hand-drawn JSON pixel art there: four #RRGGBB colours and 48 rows of 40 indices 0..3
+  4. original procedural art
+Images are centre-cropped to 5:6, scaled with macOS `sips` and reduced to their four most
+representative colours; results are cached in build/launcher/art-cache.
 This is a file-library backend, not an SD SPI model.
 """
 import hashlib
 import json
 import math
+import random
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -68,8 +77,8 @@ def library(folder):
         kind = 'GBC' if len(header) > 0x143 and header[0x143] & 0x80 else 'GB'
         info = reason or f'{kind} / {size // 1024} KB'
         games.append(Game(path.resolve(), title or path.stem.upper(), info, not reason))
-    if len(games) > 4064:
-        raise ValueError('The current ROM address space supports at most 4064 menu records')
+    if len(games) > 2032:
+        raise ValueError('The launcher image holds at most 2032 game cards (2 MiB)')
     return games
 
 
@@ -101,245 +110,293 @@ def tile_bytes(pixels):
     return bytes(out)
 
 
+ART_W, ART_H = 40, 48
+IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.heic', '.tif', '.tiff')
+ART_CACHE = ROOT / 'build/launcher/art-cache'
+
+
+def art_source(game, folder=None):
+    slug = re.sub(r'[^a-z0-9]+', '-', game.title.lower()).strip('-')
+    bases = [game.path.parent / game.path.stem]
+    if folder:
+        bases += [Path(folder) / game.path.stem, Path(folder) / slug]
+    for base in bases:
+        for suffix in IMAGE_SUFFIXES + tuple(s.upper() for s in IMAGE_SUFFIXES) + ('.json',):
+            path = Path(str(base) + suffix)
+            if path.is_file():
+                return path
+    return None
+
+
+def _read_bmp(data):
+    offset, width, height = (int.from_bytes(data[10:14], 'little'),
+                             int.from_bytes(data[18:22], 'little', signed=True),
+                             int.from_bytes(data[22:26], 'little', signed=True))
+    bpp, compression = int.from_bytes(data[28:30], 'little'), int.from_bytes(data[30:34], 'little')
+    if bpp not in (24, 32):
+        raise ValueError(f'unexpected {bpp}-bit BMP from sips')
+    masks = (0xFF0000, 0xFF00, 0xFF)
+    if compression == 3:
+        masks = tuple(int.from_bytes(data[54+4*i:58+4*i], 'little') for i in range(3))
+    shifts = [(m & -m).bit_length() - 1 for m in masks]
+    stride, step = (bpp*width + 31) // 32 * 4, bpp // 8
+    rows = []
+    for y in range(abs(height)):
+        row = offset + stride * (abs(height) - 1 - y if height > 0 else y)
+        line = []
+        for x in range(width):
+            v = int.from_bytes(data[row+x*step:row+x*step+step], 'little')
+            line.append(tuple((v & m) >> s for m, s in zip(masks, shifts)))
+        rows.append(line)
+    return rows
+
+
+def _image_rgb(path):
+    """Centre-crop to 5:6 and scale to 40x48 with sips; returns 48 rows of (r, g, b)."""
+    info = subprocess.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', str(path)],
+                          capture_output=True, text=True, check=True).stdout
+    w = int(re.search(r'pixelWidth: (\d+)', info).group(1))
+    h = int(re.search(r'pixelHeight: (\d+)', info).group(1))
+    cw, ch = (h*ART_W // ART_H, h) if w*ART_H > h*ART_W else (w, w*ART_H // ART_W)
+    with tempfile.TemporaryDirectory() as tmp:
+        crop, out = Path(tmp) / 'crop.png', Path(tmp) / 'art.bmp'
+        subprocess.run(['sips', '-s', 'format', 'png', '-c', str(ch), str(cw), str(path),
+                        '--out', str(crop)], capture_output=True, check=True)
+        subprocess.run(['sips', '-s', 'format', 'bmp', '-z', str(ART_H), str(ART_W), str(crop),
+                        '--out', str(out)], capture_output=True, check=True)
+        rows = _read_bmp(out.read_bytes())
+    if len(rows) != ART_H or len(rows[0]) != ART_W:
+        raise ValueError(f'{path}: sips produced {len(rows[0])}x{len(rows)}')
+    return rows
+
+
+def _luma(c):
+    return c[0]*3 + c[1]*6 + c[2]
+
+
+def _quantize(rows):
+    """Four representative colours (k-means), darkest first, and per-pixel indices."""
+    pixels = [p for row in rows for p in row]
+    ordered = sorted(pixels, key=_luma)
+    centres = [ordered[len(ordered)*(2*i+1)//8] for i in range(4)]
+    for _ in range(16):
+        sums = [[0, 0, 0, 0] for _ in range(4)]
+        for p in pixels:
+            k = min(range(4), key=lambda i: sum((a-b)**2 for a, b in zip(p, centres[i])))
+            s = sums[k]
+            s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; s[3] += 1
+        moved = [(s[0]//s[3], s[1]//s[3], s[2]//s[3]) if s[3] else centres[i]
+                 for i, s in enumerate(sums)]
+        if moved == centres:
+            break
+        centres = moved
+    centres.sort(key=_luma)
+    index = [[min(range(4), key=lambda i: sum((a-b)**2 for a, b in zip(p, centres[i])))
+              for p in row] for row in rows]
+    return ['#%02X%02X%02X' % c for c in centres], index
+
+
+def image_art(path):
+    st = path.stat()
+    key = hashlib.sha1(f'{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|v1'.encode()).hexdigest()
+    cached = ART_CACHE / f'{key}.json'
+    if cached.exists():
+        data = json.loads(cached.read_text())
+        return data['palette'], data['pixels']
+    palette, pixels = _quantize(_image_rgb(path))
+    ART_CACHE.mkdir(parents=True, exist_ok=True)
+    cached.write_text(json.dumps({'palette': palette, 'pixels': pixels}))
+    return palette, pixels
+
+
+def procedural_art(game):
+    seed = hashlib.sha256(game.path.name.encode()).digest()
+    palette = (['#101827', '#20546B', '#42B7A0', '#F5E7AD'],
+               ['#171C38', '#534178', '#D66791', '#FFE4AF'],
+               ['#101B2C', '#34518A', '#61BAD1', '#F2E9CE'])[seed[0] % 3]
+    pixels = [[0]*ART_W for _ in range(ART_H)]
+    for y in range(ART_H):
+        for x in range(ART_W):
+            if y > 30 - abs(x-11)//2:
+                pixels[y][x] = 1
+            if y > 38 - abs(x-31)//2:
+                pixels[y][x] = 2
+            if (x-30)**2 + (y-10)**2 < 16:
+                pixels[y][x] = 3
+            if y >= 44 and (x//4 + y//2) % 2:
+                pixels[y][x] = 3
+    for i in range(9):
+        pixels[seed[i+10] % 20 + 2][seed[i+1] % 38 + 1] = 2
+    initials = ''.join(word[0] for word in game.title.split() if word[0].isalnum())[:3]
+    left = (ART_W - 7*len(initials) + 2) // 2
+    for n, ch in enumerate(initials):
+        for y, row in enumerate(bytes.fromhex(FONT.get(ch, FONT['?']))):
+            for x in range(5):
+                if row & (16 >> x):
+                    pixels[23+y][left+n*7+x] = 3
+    return palette, pixels
+
+
 def cover(game, folder=None):
-    path = Path(folder) / (game.path.stem + '.json') if folder else None
-    if path and not path.exists():
-        slug = re.sub(r'[^a-z0-9]+', '-', game.title.lower()).strip('-')
-        path = Path(folder) / (slug + '.json')
-    if path and path.exists():
+    """(480 bytes of 40x48 tiles, 8-byte RGB555 palette) for one game card."""
+    path = art_source(game, folder)
+    if path is None:
+        palette, pixels = procedural_art(game)
+    elif path.suffix == '.json':
         data = json.loads(path.read_text())
         palette, rows = data['palette'], data['pixels']
-        if len(palette) != 4 or len(rows) != 48 or any(len(row) != 32 or set(row)-set('0123') for row in rows):
-            raise ValueError(f'{path}: cover requires four colours and 32x48 pixels using 0..3')
+        if len(palette) != 4 or len(rows) != ART_H or any(
+                len(row) != ART_W or set(row)-set('0123') for row in rows):
+            raise ValueError(f'{path}: card art requires four colours and 40x48 pixels using 0..3')
         pixels = [[int(c) for c in row] for row in rows]
     else:
-        seed = hashlib.sha256(game.path.name.encode()).digest()
-        palettes = (
-            ['#101827', '#20546B', '#42B7A0', '#F5E7AD'],
-            ['#171C38', '#534178', '#D66791', '#FFE4AF'],
-            ['#101B2C', '#34518A', '#61BAD1', '#F2E9CE'],
-        )
-        palette = palettes[seed[0] % len(palettes)]
-        pixels = [[0 for _ in range(32)] for _ in range(48)]
-        for y in range(48):
-            for x in range(32):
-                if y > 30 - abs(x-9)//2:
-                    pixels[y][x] = 1
-                if y > 38 - abs(x-25)//2:
-                    pixels[y][x] = 2
-                if (x-24)**2 + (y-10)**2 < 16:
-                    pixels[y][x] = 3
-                if y >= 44 and (x//4+y//2) % 2:
-                    pixels[y][x] = 3
-        for i in range(9):
-            x, y = seed[i+1] % 30 + 1, seed[i+10] % 20 + 2
-            pixels[y][x] = 2
-        initials = ''.join(word[0] for word in game.title.split() if word[0].isalnum())[:3]
-        for n, ch in enumerate(initials):
-            rows = bytes.fromhex(FONT.get(ch, FONT['?']))
-            for y, row in enumerate(rows):
-                for x in range(5):
-                    if row & (16 >> x):
-                        pixels[23+y][6+n*7+x] = 3
-    colors = b''.join(rgb555(c).to_bytes(2, 'little') for c in palette)
-    return tile_bytes(pixels) + colors
+        palette, pixels = image_art(path)
+    return tile_bytes(pixels), palettes(palette)
 
 
 def text(value, width=20):
     return bytes(ord(c)-32 if c in FONT or c == ' ' else ord('?')-32
                  for c in value.upper()[:width].ljust(width))
 
-def wrapped_text(value, width, lines):
-    parts = textwrap.wrap(value.upper(), width=width)[:lines]
-    return b''.join(text(part, width) for part in parts + ['']*(lines-len(parts)))
-
-
-# ---------------- arcade hall (host/arcade/engine.asm) ----------------
+# ---------------- card wall (host/arcade/engine.asm) ----------------
 ENGINE = ROOT / 'host/arcade/engine.bin'
-FONT_TILES, SPRITE_TILES, BG_MAP, BG_ATTR = 0x2000, 0x2A00, 0x2C00, 0x2E00
-WIN_MAP, WIN_ATTR, BG_PALS, OBJ_PALS = 0x3000, 0x3080, 0x3100, 0x3140
-MARQUEE_PALS, IDLE_TEXT, LOAD_TEXT, BLANK_RECORD = 0x3180, 0x31A0, 0x3200, 0x3400
-GAME_COUNT, LAST_ROOM = 0x3FF0, 0x3FF2
-WORLD, COVER_TILE = 96, 160
+FONT_TILES, SPRITE_TILES, BG_MAP, BG_ATTR = 0x2000, 0x2800, 0x2900, 0x2B40
+BG_PALS, OBJ_PALS, IDLE_TEXT, LOAD_TEXT = 0x2D80, 0x2DC0, 0x2E00, 0x2E40
+BLANK_RECORD, GAME_COUNT, LAST_PAGE = 0x3000, 0x3FF0, 0x3FF2
+RECORD, PER_BANK, PAGE = 1024, 16, 6
+WORLD = 96                                                  # first wall tile, after the font
+CARDS = [(8, 16), (56, 16), (104, 16), (16, 72), (64, 72), (112, 72)]   # engine's CardPos
 
-HALL = ['#120F24', '#2D2357', '#6C5BB8', '#F7D774']      # bg, wall, cabinet, lights
-TEXT = ['#120F24', '#F2F5E9', '#62D9D0', '#7191AE']
-MARQUEE_DIM = ['#3A2E6B', '#B9A9F0', '#3A2E6B', '#3A2E6B']
-MARQUEE_LIT = ['#F7D774', '#2A1B4F', '#F7D774', '#F7D774']
-PLAYER = ['#000000', '#F7C59F', '#3FA7D6', '#1A1A2E']    # colour 0 transparent
-COIN = ['#000000', '#F7D774', '#C08A2E', '#FFFFFF']
-
-# 8x8 world tiles, '0'-'3' = palette colours of HALL
-WORLD_TILES = {
-    'blank': ['00000000'] * 8,
-    'wall': ['11111111', '11111111', '11101111', '11111111',
-             '11111111', '11111111', '11111110', '11111111'],
-    'light': ['11111111', '00010000', '00010000', '00333000',
-              '03333300', '00333000', '00000000', '00000000'],
-    'floor_a': ['22222221', '22222211', '22222111', '22221111',
-                '22211111', '22111111', '21111111', '11111111'],
-    'floor_b': ['11111112', '11111122', '11111222', '11112222',
-                '11122222', '11222222', '12222222', '22222222'],
-    'cab_tl': ['00333333', '03222222', '32222222', '32200000',
-               '32200000', '32200000', '32200000', '32222222'],
-    'cab_tr': ['33333300', '22222230', '22222223', '00000223',
-               '00000223', '00000223', '00000223', '22222223'],
-    'cab_l': ['32222222', '32222222', '32200000', '32200000',
-              '32200000', '32200000', '32222222', '32222222'],
-    'cab_r': ['22222223', '22222223', '00000223', '00000223',
-              '00000223', '00000223', '22222223', '22222223'],
-    'panel_l': ['32222222', '32333333', '32322222', '32322222',
-                '32322222', '32322222', '32333333', '32222222'],
-    'stick': ['22222222', '33333333', '22233222', '22333322',
-              '22233222', '22213222', '33333333', '22222222'],
-    'buttons': ['22222222', '33333333', '22222222', '23322332',
-                '23322332', '22222222', '33333333', '22222222'],
-    'panel': ['22222222', '33333333', '22222222', '22222222',
-              '22222222', '22222222', '33333333', '22222222'],
-    'panel_r': ['22222223', '33333323', '22222323', '22222323',
-                '22222323', '22222323', '33333323', '22222223'],
-    'base_l': ['32222222', '32222222', '32222222', '32222222',
-               '32222222', '32222222', '32222222', '11111111'],
-    'base': ['22222222', '22222222', '22222222', '22222222',
-             '22222222', '22222222', '22222222', '11111111'],
-    'slot': ['22222222', '22000022', '22033022', '22000022',
-             '22222222', '22222222', '22222222', '11111111'],
-    'base_r': ['22222223', '22222223', '22222223', '22222223',
-               '22222223', '22222223', '22222223', '11111111'],
-    'edge': ['00000000', '00000000', '11111111', '11111111',
-             '11111111', '11111111', '11111111', '11111111'],
-}
-TILE = {name: WORLD + i for i, name in enumerate(WORLD_TILES)}
-
-# 16x16 player frames: stand, walk 1, walk 2, jump ('.' transparent, s skin, b shirt, d dark)
-PLAYER_FRAMES = [
-    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
-     '...dssdssdss....', '...dsssssss.....', '....dsssss......', '.....ddddd......',
-     '....dbbbbbd.....', '...dbbbbbbbd....', '...sdbbbbbds....', '...sdbbbbbds....',
-     '....ddddddd.....', '....dd...dd.....', '....dd...dd.....', '...ddd...ddd....'],
-    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
-     '...dssdssdss....', '...dsssssss.....', '....dsssss......', '.....ddddd......',
-     '....dbbbbbd.....', '...dbbbbbbbds...', '..sdbbbbbbd.....', '....dbbbbbd.....',
-     '....ddddddd.....', '...dd....dd.....', '..dd......dd....', '..dd.......dd...'],
-    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
-     '...dssdssdss....', '...dsssssss.....', '....dsssss......', '.....ddddd......',
-     '....dbbbbbd.....', '..sdbbbbbbbd....', '....dbbbbbbds...', '....dbbbbbd.....',
-     '....ddddddd.....', '.....dd.dd......', '.....dd.dd......', '....ddd.ddd.....'],
-    ['.....dddddd.....', '....dbbbbbbd....', '...dbbbbbbbbd...', '...ddddddddd....',
-     '...dssdssdss....', '..sdsssssss.s...', '..s.dsssss..s...', '.....ddddd......',
-     '....dbbbbbd.....', '...dbbbbbbbd....', '...dbbbbbbbd....', '....ddddddd.....',
-     '...dd.....dd....', '..dd.......dd...', '................', '................'],
-]
-COIN_FRAMES = [
-    ['..1111..', '.122221.', '12233221', '12232221', '12232221', '12233221', '.122221.', '..1111..'],
-    ['...11...', '...12...', '...12...', '...13...', '...13...', '...12...', '...12...', '...11...'],
-]
-
-
-def _pixels(rows, legend):
-    return [[legend[c] for c in row] for row in rows]
-
-
-def sprite_tiles():
-    """8x16 OBJ mode: each 16x16 frame is a left and right column of two tiles."""
-    out = bytearray()
-    legend = {'.': 0, 's': 1, 'b': 2, 'd': 3}
-    for frame in PLAYER_FRAMES:
-        px = _pixels(frame, legend)
-        for half in (0, 8):
-            out += tile_bytes([row[half:half+8] for row in px])
-    for frame in COIN_FRAMES:
-        out += tile_bytes(_pixels(frame, {'.': 0, '1': 1, '2': 2, '3': 3}))
-        out += bytes(16)
-    return bytes(out).ljust(24*16, b'\0')
+WALL = ['#4A4844', '#F8D830', '#2C2A28', '#605D58']    # concrete, heading text, shadow, speck
+BANNER = ['#C8381E', '#1A0E0A', '#F8D040', '#8A2010']  # red, text, stripe, hatch
+FRAME = ['#000000', '#F8F8F8', '#B8B8B8', '#202020']   # colour 0 transparent
 
 
 def palettes(*sets):
     return b''.join(rgb555(c).to_bytes(2, 'little') for p in sets for c in p)
 
 
-def marquee(title):
-    words = [w for w in re.split(r'[^A-Z0-9]+', title.upper()) if w]
-    letters = ''.join(w[0] for w in words) if len(words) > 1 else (words[0] if words else '?')
-    return text(letters[:4].center(4), 4)
-
-
-def grey(record_palette):
+def shade(palette, scale, offset):
+    """Grey version of an RGB555 palette: luma * scale/16 + offset (5-bit)."""
     out = bytearray()
     for i in range(0, 8, 2):
-        c = int.from_bytes(record_palette[i:i+2], 'little')
-        y = ((c & 31)*3 + (c >> 5 & 31)*6 + (c >> 10 & 31)) // 10 // 2 + 4
+        c = int.from_bytes(palette[i:i+2], 'little')
+        y = min(31, ((c & 31)*3 + (c >> 5 & 31)*6 + (c >> 10 & 31)) // 10 * scale // 16 + offset)
         out += (y | y << 5 | y << 10).to_bytes(2, 'little')
     return bytes(out)
 
 
+def _noise(seed):
+    rnd = random.Random(seed)
+    tile = [[0]*8 for _ in range(8)]
+    for y in range(8):
+        for x in range(8):
+            r = rnd.random()
+            tile[y][x] = 3 if r < 0.08 else 2 if r < 0.15 else 0
+    if seed % 4 == 3:                                    # a short crack
+        x = rnd.randrange(8)
+        for y in range(8):
+            tile[y][x] = 2
+            x = max(0, min(7, x + rnd.choice((-1, 0, 1))))
+    return tile
+
+
+def wall_tiles():
+    """Concrete noise, card drop shadows (2 px, offset 2 px) and the banner stripe."""
+    tiles = {f'noise{i}': _noise(i) for i in range(8)}
+    def shadow(cols, rows):
+        t = [row[:] for row in tiles['noise0']]
+        for y in rows:
+            for x in cols:
+                t[y][x] = 2
+        return t
+    tiles['sh_r_top'] = shadow((0, 1), range(2, 8))
+    tiles['sh_r'] = shadow((0, 1), range(8))
+    tiles['sh_b_left'] = shadow(range(2, 8), (0, 1))
+    tiles['sh_b'] = shadow(range(8), (0, 1))
+    tiles['sh_c'] = shadow((0, 1), (0, 1))
+    tiles['band'] = [[2]*8] + [[3 if (x+y) % 8 in (0, 1) else 0 for x in range(8)]
+                               for y in range(1, 8)]
+    return tiles
+
+
+def frame_tiles():
+    """8x16 sprite pairs: top edge, bottom edge, left edge, right edge of the 2 px frame."""
+    def t(rows):
+        return tile_bytes([[int(c) for c in row] for row in rows])
+    empty = ['00000000']*8
+    return (t(empty) + t(['00000000']*6 + ['11111111']*2)
+            + t(['11111111']*2 + ['00000000']*6) + t(empty)
+            + t(['00000011']*8)*2 + t(['11000000']*8)*2)
+
+
+def banner_text(game):
+    """Two banner rows: the title, then its second line or the size/type (or why it can't run)."""
+    lines = textwrap.wrap(game.title.upper(), 19) or ['']
+    second = lines[1] if game.playable and len(lines) > 1 else game.info
+    return text(' ' + lines[0]) + text(' ' + second)
+
+
 def record(game, covers):
-    art = cover(game, covers)
-    tiles, pal = art[:384], art[384:392]
-    hint = 'A: INSERT COIN' if game.playable else 'OUT OF ORDER'
-    return (tiles + (pal if game.playable else grey(pal)) + wrapped_text(game.title, 20, 2)
-            + text(game.info) + text(hint) + bytes((int(game.playable),)) + marquee(game.title))
+    tiles, pal = cover(game, covers)
+    dim = shade(pal, 8, 3)
+    if not game.playable:
+        pal = shade(pal, 11, 4)
+    return tiles + pal + dim + banner_text(game) + bytes((int(game.playable),))
 
 
 def blank_record():
-    pixels = [[0]*32 for _ in range(48)]
-    for y in range(48):
-        for x in range(32):
-            if (x + y) % 6 == 0:
-                pixels[y][x] = 1
-    for y, row in enumerate(bytes.fromhex(FONT['?'])):
-        for x in range(5):
-            if row & (16 >> x):
-                for dy in range(2):
-                    for dx in range(2):
-                        pixels[17+2*y+dy][11+2*x+dx] = 3
-    return (tile_bytes(pixels) + palettes(['#0B0A16', '#1E1A33', '#2D2357', '#4B3F7A'])
-            + wrapped_text('EMPTY CABINET', 20, 2) + text('') + text('ADD MORE GAMES')
-            + bytes((0,)) + text('----', 4))
+    """Empty card slot: concrete in the wall's colours, so it disappears into the wall."""
+    noise = [_noise(i) for i in range(8)]
+    pixels = [[noise[(x//8 + y//8*3) % 8][y % 8][x % 8] for x in range(ART_W)] for y in range(ART_H)]
+    wall = palettes(WALL[:1] + WALL[:1] + WALL[2:])
+    return tile_bytes(pixels) + wall + wall + text('')*2 + bytes((0,))
 
 
-def hall_maps():
-    bg, attr = bytearray(32*14), bytearray(32*14)
-    def put(row, col, tile, pal=0):
-        bg[row*32+col], attr[row*32+col] = tile, pal
-    for col in range(32):
-        put(1, col, TILE['light'] if col % 3 == 1 else TILE['blank'])
-        for row in range(2, 11):
-            put(row, col, TILE['wall'])
-        put(11, col, TILE['edge'])
-        put(12, col, TILE['floor_a' if col % 2 else 'floor_b'])
-        put(13, col, TILE['floor_b' if col % 2 else 'floor_a'])
-    for k in range(3):
-        c = 7*k
-        put(2, c, TILE['cab_tl'])
-        put(2, c+5, TILE['cab_tr'])
-        for i in range(4):
-            put(2, c+1+i, 0, 5+k)                   # marquee text, filled per room
+def wall_maps(heading, pages, tile):
+    bg, attr = bytearray(32*18), bytearray(32*18)
+    rnd = random.Random(1)
+    def put(row, col, value, pal=0):
+        bg[row*32+col], attr[row*32+col] = value, pal
+    for row in range(15):
+        for col in range(32):
+            put(row, col, tile[f'noise{rnd.randrange(8) if rnd.random() < 0.6 else 0}'])
+    bg[0:20] = text(heading.center(20))
+    for k, (x, y) in enumerate(CARDS):
+        c0, r0 = x // 8, y // 8
         for r in range(6):
-            put(3+r, c, TILE['cab_l'])
-            put(3+r, c+5, TILE['cab_r'])
-            for i in range(4):
-                put(3+r, c+1+i, COVER_TILE + 24*k + r*4 + i, 1+k)
-        for i, name in enumerate(('panel_l', 'stick', 'buttons', 'panel', 'panel', 'panel_r')):
-            put(9, c+i, TILE[name])
-        for i, name in enumerate(('base_l', 'base', 'slot', 'base', 'base', 'base_r')):
-            put(10, c+i, TILE[name])
+            for c in range(5):
+                put(r0+r, c0+c, k*30 + r*5 + c, 0x08 | (1+k))   # VRAM bank 1, palette 1+k
+        put(r0, c0+5, tile['sh_r_top'])
+        for r in range(1, 6):
+            put(r0+r, c0+5, tile['sh_r'])
+        if r0 + 6 < 15:
+            put(r0+6, c0, tile['sh_b_left'])
+            for c in range(1, 5):
+                put(r0+6, c0+c, tile['sh_b'])
+            put(r0+6, c0+5, tile['sh_c'])
+    if pages > 1:
+        put(8, 0, text('<', 1)[0])
+        put(8, 19, text('>', 1)[0])
+    for col in range(32):
+        put(15, col, tile['band'], 7)
+        put(16, col, 0, 7)
+        put(17, col, 0, 7)
     return bg, attr
 
 
-def banner(lines):
-    return b''.join(text(line) for line in (lines + ['']*4)[:4])
-
-
 def build(games, covers=None, query="", total=None):
-    """Arcade-hall launcher ROM: the engine plus graphics and one record per game."""
+    """Card-wall launcher ROM: the engine plus graphics and one 1 KiB record per game."""
     count = len(games)
     total = count if total is None else total
-    banks = 1 + math.ceil(count/32)
+    banks = 1 + math.ceil(count / PER_BANK)
     size = max(0x8000, 1 << (banks*0x4000-1).bit_length())
     image = bytearray(size)
-    image[:0x2000] = ENGINE.read_bytes()[:0x2000]
-    image[0x134:0x143] = b'TANG ARCADE'.ljust(15, b'\0')
+    engine = ENGINE.read_bytes()
+    if any(engine[0x2000:0x4000]):
+        raise ValueError('engine.bin overlaps the launcher data area')
+    image[:0x2000] = engine[:0x2000]
+    image[0x134:0x143] = b'TANG LAUNCHER'.ljust(15, b'\0')
     image[0x143] = 0x80
     image[0x147] = 0x19                                  # MBC5, no RAM
     image[0x148] = size.bit_length()-16
@@ -347,29 +404,27 @@ def build(games, covers=None, query="", total=None):
     for ch in range(32, 128):
         rows = bytes.fromhex(FONT.get(chr(ch), '00000000000000'))
         font.extend(b for row in (*rows, 0) for b in (row << 1, 0))
-    world = b''.join(tile_bytes(_pixels(t, {c: int(c) for c in '0123'})) for t in WORLD_TILES.values())
-    image[FONT_TILES:FONT_TILES+0xA00] = (bytes(font) + world).ljust(0xA00, b'\0')
-    image[SPRITE_TILES:SPRITE_TILES+24*16] = sprite_tiles()
-    bg, attr = hall_maps()
-    heading = f'FIND:{query} {count}/{total}' if query else f'TANG ARCADE {count} GAMES'
-    bg[0:20], attr[0:20] = text(heading), bytes((4,))*20
+    tiles = wall_tiles()
+    tile = {name: WORLD + i for i, name in enumerate(tiles)}
+    world = b''.join(tile_bytes(t) for t in tiles.values())
+    image[FONT_TILES:FONT_TILES+0x800] = (bytes(font) + world).ljust(0x800, b'\0')
+    image[SPRITE_TILES:SPRITE_TILES+128] = frame_tiles()
+    pages = max(1, math.ceil(count / PAGE))
+    heading = f'FIND:{query} {count}/{total}' if query else 'SELECT GAME'
+    bg, attr = wall_maps(heading[:20], pages, tile)
     image[BG_MAP:BG_MAP+len(bg)], image[BG_ATTR:BG_ATTR+len(attr)] = bg, attr
-    image[WIN_MAP:WIN_MAP+128], image[WIN_ATTR:WIN_ATTR+128] = bytes(128), bytes((4,))*128
-    image[BG_PALS:BG_PALS+64] = palettes(HALL, HALL, HALL, HALL, TEXT,
-                                         MARQUEE_DIM, MARQUEE_DIM, MARQUEE_DIM)
-    image[OBJ_PALS:OBJ_PALS+16] = palettes(PLAYER, COIN)
-    image[MARQUEE_PALS:MARQUEE_PALS+16] = palettes(MARQUEE_DIM, MARQUEE_LIT)
-    image[IDLE_TEXT:IDLE_TEXT+80] = banner(
-        ['NO MATCHES' if query and not count else 'WALK TO A CABINET',
-         '<> WALK  B RUN', 'UP JUMP', 'A OR START: PLAY'])
-    image[LOAD_TEXT:LOAD_TEXT+80] = banner(['COIN INSERTED!', 'LOADING GAME...', '', 'HANG TIGHT'])
+    image[BG_PALS:BG_PALS+64] = palettes(WALL, *[WALL]*6, BANNER)
+    image[OBJ_PALS:OBJ_PALS+8] = palettes(FRAME)
+    image[IDLE_TEXT:IDLE_TEXT+40] = (text(' NO MATCHES' if query else ' NO GAMES YET')
+                                     + text(' TRY ANOTHER SEARCH' if query else ' ADD .GB/.GBC FILES'))
+    image[LOAD_TEXT:LOAD_TEXT+20] = text(' LOADING...')
     blank = blank_record()
     image[BLANK_RECORD:BLANK_RECORD+len(blank)] = blank
     image[GAME_COUNT:GAME_COUNT+2] = count.to_bytes(2, 'little')
-    image[LAST_ROOM:LAST_ROOM+2] = ((max(count, 1)-1)//3*3).to_bytes(2, 'little')
+    image[LAST_PAGE:LAST_PAGE+2] = ((pages-1)*PAGE).to_bytes(2, 'little')
     for i, game in enumerate(games):
         data = record(game, covers)
-        offset = 0x4000*(1 + i//32) + (i % 32)*512
+        offset = 0x4000*(1 + i//PER_BANK) + (i % PER_BANK)*RECORD
         image[offset:offset+len(data)] = data
     image[0x14D] = -sum(image[0x134:0x14D])-25 & 255
     checksum = (sum(image) - image[0x14E] - image[0x14F]) & 65535

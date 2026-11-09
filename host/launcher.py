@@ -4,8 +4,10 @@
   /usr/bin/python3 host/launcher.py /path/to/roms [--covers /path/to/covers]
   /usr/bin/python3 host/launcher.py /path/to/roms --build-only
 
-The launcher is itself a GBC game (host/arcade): walk the arcade hall with left/right
-(B runs, Up jumps) and press A or Start at a cabinet; the Mac window searches. F1 / Home saves the current game and returns to the
+The launcher is itself a GBC game (host/arcade): a wall of game cards, six per page. Left/right
+cycle through cards and pages, up/down change rows, A or Start plays; the Mac window searches.
+Card art: save an image beside the ROM with the same name (e.g. "Tetris (World).png"); see
+host/menu.py. F1 / Home saves the current game and returns to the
 library. Battery saves live beside each ROM as <ROM stem>.sav (cartridge RAM plus the
 standard 48-byte MBC3 clock footer). They are restored at launch and stored on Home,
 on switching games, on exit, and shortly after the game writes save RAM (at most once

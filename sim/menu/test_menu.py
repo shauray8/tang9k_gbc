@@ -43,27 +43,58 @@ class MenuTests(unittest.TestCase):
                 selections.append(lo[0] | hi[0] << 8)
             self.assertEqual(selections, expected)
 
-    # GB_PRESS masks: 1 right, 2 left, 4 up, 16 A, 32 B, 128 start. The player starts in
-    # front of the middle cabinet; walking off an edge enters the next/previous room.
-    def test_launch_cabinet_in_front_of_player(self):
-        self.run_menu(3, '30:33:16', [1])
+    # GB_PRESS masks: 1 right, 2 left, 4 up, 8 down, 16 A, 128 start. The cursor starts on
+    # the first card; cards 0-2 are the top row, 3-5 the bottom row, six per page.
+    def test_launch_selected_card(self):
+        self.run_menu(3, '30:33:16', [0])
+        self.run_menu(3, '30:33:1,40:43:128', [1])
 
-    def test_walk_to_another_cabinet(self):
-        self.run_menu(3, '30:90:1,100:103:16', [2])
+    def test_rows(self):
+        self.run_menu(6, '30:33:8,40:43:16', [3])
+        self.run_menu(6, '30:33:8,40:43:4,50:53:16', [0])
+        self.run_menu(5, '30:33:1,36:39:1,42:45:8,50:53:16', [4])   # short bottom row: last card
+        self.run_menu(3, '30:33:8,40:43:16', [0])                   # no bottom row
 
-    def test_run_into_next_room(self):
-        self.run_menu(6, '30:80:33,100:103:128', [3])
+    def test_right_past_the_page_loads_the_next(self):
+        presses = ','.join(f'{30+6*i}:{32+6*i}:1' for i in range(6))
+        self.run_menu(8, presses + ',80:83:16', [6])
 
-    def test_wrap_to_last_room_above_255_and_banks(self):
-        self.run_menu(261, '30:100:2,110:113:16', [260])
-        self.run_menu(36, '30:100:2,110:113:16', [35])
+    def test_wrap_to_last_page_above_255_and_banks(self):
+        self.run_menu(261, '30:33:2,50:53:16', [260])
+        self.run_menu(36, '30:33:2,50:53:16', [35])
 
-    def test_disabled_and_empty_cabinets_do_not_launch(self):
-        self.run_menu(2, '30:33:16,50:100:2,110:113:16', [0], disabled=(1,))
-        self.run_menu(1, '30:33:16,50:100:2,110:113:16', [0])
+    def test_disabled_and_single_page_wrap(self):
+        self.run_menu(2, '30:33:1,40:43:16', [], disabled=(1,))
+        self.run_menu(1, '30:33:1,40:43:16', [0])
 
     def test_empty_library_cannot_launch(self):
         self.run_menu(0, '30:33:16,40:90:2,100:103:128', [])
+
+    def test_user_image_becomes_four_colour_card_art(self):
+        # 100x96 BMP (wider than 5:6, so the sides are cropped): four colour quadrants.
+        colours = {(0, 0): (255, 0, 0), (1, 0): (0, 255, 0), (0, 1): (0, 0, 255), (1, 1): (255, 255, 255)}
+        w, h = 100, 96
+        rows = b''.join(bytes(c for x in range(w) for c in colours[(x >= 50, y >= 48)][::-1])
+                        for y in reversed(range(h)))                       # BGR, bottom-up
+        header = (b'BM' + (54 + len(rows)).to_bytes(4, 'little') + bytes(4) + (54).to_bytes(4, 'little')
+                  + (40).to_bytes(4, 'little') + w.to_bytes(4, 'little') + h.to_bytes(4, 'little')
+                  + (1).to_bytes(2, 'little') + (24).to_bytes(2, 'little') + bytes(24))
+        with tempfile.TemporaryDirectory(dir=self.out) as temporary:
+            folder = Path(temporary)
+            (folder / 'Game (USA).bmp').write_bytes(header + rows)
+            game = menu.Game(folder / 'Game (USA).gbc', 'GAME', 'GBC', True)
+            self.assertEqual(menu.art_source(game), folder / 'Game (USA).bmp')
+            palette, pixels = menu._quantize(menu._image_rgb(folder / 'Game (USA).bmp'))
+        self.assertEqual(len(pixels), 48)
+        self.assertEqual(len(pixels[0]), 40)
+        rgb = [tuple(int(c[i:i+2], 16) for i in (1, 3, 5)) for c in palette]
+        def near(index, expected):
+            return max(abs(a-b) for a, b in zip(rgb[index], expected)) < 24
+        self.assertTrue(near(3, (255, 255, 255)))                          # lightest last
+        self.assertTrue(near(pixels[2][2], (255, 0, 0)))                    # top left red
+        self.assertTrue(near(pixels[2][37], (0, 255, 0)))                   # top right green
+        self.assertTrue(near(pixels[45][2], (0, 0, 255)))                   # bottom left blue
+        self.assertEqual(pixels[45][37], 3)
 
     def test_case_insensitive_search_and_no_results(self):
         games = [menu.Game(Path('Mario Deluxe.gbc'), 'MARIO DELUXE', 'GBC', True),
