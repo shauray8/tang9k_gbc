@@ -77,6 +77,10 @@ int main(int argc, char **argv) {
         }
         if (g->ser_valid) {
             char c = (char)g->ser_data; putchar(c); fflush(stdout); ser += c;
+            // Mooneye protocol: Fibonacci bytes 3 5 8 13 21 34 = pass, six 0x42 = fail.
+            static const std::string fib("\x03\x05\x08\x0D\x15\x22", 6), bad(6, '\x42');
+            if (ser.size() >= 6 && ser.compare(ser.size() - 6, 6, fib) == 0) { printf("\nPassed\n"); break; }
+            if (ser.size() >= 6 && ser.compare(ser.size() - 6, 6, bad) == 0) { printf("\nFailed\n"); break; }
             if (ser.find("Passed") != std::string::npos || ser.find("Failed") != std::string::npos) break;
         }
     }
