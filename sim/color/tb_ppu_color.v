@@ -48,7 +48,8 @@ module tb;
     ppu dut (
         .clk(clk), .rst(rst), .ce_t(ce_t), .ce(ce), .cgb_mode(cgb),
         .cpu_addr(addr), .cpu_wr(cpu_wr), .cpu_din(din), .cpu_dout(dout),
-        .vram_sel(vram_sel), .vram_dma(1'b0), .oam_sel(oam_sel), .reg_sel(reg_sel),
+        .vram_sel(vram_sel), .vram_dma(1'b0), .oam_dma_vram(1'b0), .oam_dma_addr(13'd0), .oam_dma_vq(),
+        .oam_sel(oam_sel), .reg_sel(reg_sel),
         .dma_act(1'b0), .dma_we(1'b0), .dma_idx(8'd0), .dma_data(8'd0),
         .irq_vblank(), .irq_stat(), .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb),
         .pix_x(pix_x), .pix_y(pix_y), .vsync(vsync), .lcd_on(lcd_on)

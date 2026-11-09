@@ -14,9 +14,10 @@ module gb (
     output     [7:0]  pix_y,
     output            vsync,
     output            lcd_on,
-    // cartridge (from header, set by the loader): type 0 none, 1 MBC1, 2 MBC3, 3 MBC5
+    // cartridge (from header, set by the loader): type 0 none, 1 MBC1 (or MBC2), 2 MBC3, 3 MBC5
     input      [1:0]  cart_type,
     input             cart_rtc,         // header type 0F/10: MBC3 with timer
+    input             cart_mbc2,        // header type 05/06: MBC2 (cart_type is 1)
     input             cart_ram,         // header declares cartridge RAM
     input      [8:0]  rom_mask,         // ROM bank mask (banks - 1)
     input      [3:0]  ram_mask,         // RAM bank mask
@@ -98,17 +99,25 @@ module gb (
     end
 
     // ---------------- memories ----------------
-    // OAM DMA (FF46): 160 M-cycles. Like hardware, DMA owns the external bus
-    // (ROM/WRAM) while active; the CPU only sees HRAM/IO. This keeps every
+    // OAM DMA (FF46): written in M-cycle 0, idle in M1 (a running DMA keeps going), then
+    // 160 transfer cycles M2..M161. The DMA owns only the bus it reads: a ROM/cart-RAM/WRAM
+    // source holds the external bus (CPU locked out of 0000-7FFF and A000-FDFF), a VRAM
+    // source holds VRAM. OAM is always locked; HRAM/IO stay free. This keeps every
     // memory single-ported (one BSRAM port each).
-    reg dma_act;
-    reg [7:0] dma_hi, dma_idx;
-    wire [15:0] dma_src = {dma_hi, dma_idx};
-    wire [15:0] ma = hdma_owns ? hdma_src : dma_act ? dma_src : a;
-    wire cpu_blk = dma_act && a[15:8] != 8'hFF; // CPU locked out of everything but HRAM/IO
+    reg dma_act, dma_pend;
+    reg [7:0] dma_hi, dma_src_hi, dma_idx;   // dma_hi = FF46 as written
+    wire [15:0] dma_src = {dma_src_hi, dma_idx};
+    wire dma_vram = dma_act && dma_src[15:13] == 3'b100;
+    wire dma_ext = dma_act && !dma_vram;
+    wire [15:0] ma = hdma_owns ? hdma_src : dma_ext ? dma_src : a;
+    wire a_vram = a[15:13] == 3'b100;
+    wire cpu_blk = dma_act && a[15:8] != 8'hFF &&
+                   (a[15:8] == 8'hFE || (dma_vram ? a_vram : !a_vram));
 
-    // ---------------- cartridge: MBC1/3/5 mapping onto external memory (PSRAM) ----------------
+    // ---------------- cartridge: MBC1/2/3/5 mapping onto external memory (PSRAM) ----------------
     // ROM at ext {bank, a[13:0]}; cartridge RAM at ext 0x3E0000 + {ram_bank, a[12:0]}.
+    // MBC2: address bit 8 picks RAM enable vs ROM bank anywhere in 0000-3FFF; its built-in
+    // 512 x 4-bit RAM echoes through A000-BFFF and reads back with the upper nibble set.
     // The CPU/DMA address is stable for the whole M-cycle; one request is issued at cycle start
     // and ext_rd must be valid >=2 clk before the next ce (see psram_bridge).
     reg ram_en, mbc1_mode;
@@ -117,6 +126,12 @@ module gb (
     reg mbc3_invalid;
     always @(posedge clk) begin
         if (rst) begin ram_en <= 0; mbc1_mode <= 0; rom_bank <= 9'd1; ram_bank <= 0; mbc3_invalid <= 0; end
+        else if (wr_now && a[15] == 1'b0 && cart_mbc2) begin
+            if (!a[14]) begin
+                if (a[8]) rom_bank[3:0] <= cpu_dout[3:0] == 0 ? 4'd1 : cpu_dout[3:0];
+                else ram_en <= cpu_dout[3:0] == 4'hA;
+            end
+        end
         else if (wr_now && a[15] == 1'b0) case (cart_type)
             2'd1: case (a[14:13])                                   // MBC1
                 2'd0: ram_en <= cpu_dout[3:0] == 4'hA;
@@ -153,7 +168,7 @@ module gb (
     wire rtc_sel = cart_window && mbc3 && cart_rtc && !mbc3_invalid &&
                    ram_bank >= 4'h8 && ram_bank <= 4'hC;
     wire [7:0] rtc_q;
-    wire [7:0] cart_q = rtc_sel ? rtc_q : cram_sel ? ext_rd : 8'hFF;
+    wire [7:0] cart_q = rtc_sel ? rtc_q : cram_sel ? (cart_mbc2 ? {4'hF, ext_rd[3:0]} : ext_rd) : 8'hFF;
     mbc3_rtc rtc (
         .clk(clk), .rst(rst || !cart_rtc),
         .latch_wr(wr_now && mbc3 && cart_rtc && a[15:13] == 3'b011),
@@ -161,13 +176,14 @@ module gb (
         .din(cpu_dout), .dout(rtc_q),
         .host_load(rtc_host_load), .host_d(rtc_host_d), .live(rtc_live)
     );
-    assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} : {5'b11111, rbank, ma[12:0]};
+    assign ext_addr = rom_sel ? {bank[7:0], ma[13:0]} :
+                      {5'b11111, rbank, cart_mbc2 ? {4'd0, ma[8:0]} : ma[12:0]};
     reg cyc_start;                // also set right after reset: the first opcode fetch (0100) needs a request
     always @(posedge clk) cyc_start <= ce || rst || hdma_release;
     assign ext_req = !rst && (rom_sel || cram_sel) &&
                      (hdma_owns ? (hdma_start || hdma_req || bus_resume) :
-                      (cyc_start || bus_resume) && !(cpu_wr && !dma_act && rom_sel));
-    assign ext_we = !hdma_owns && cpu_wr && !dma_act && cram_sel;
+                      (cyc_start || bus_resume) && !(cpu_wr && !dma_ext && rom_sel));
+    assign ext_we = !hdma_owns && cpu_wr && !cpu_blk && cram_sel;
     assign ext_wd = cpu_dout;
 
     // WRAM: 8 x 4 KiB. C000-CFFF is bank 0; D000-DFFF is SVBK bank 1..7 (0 selects 1). E000-FDFF echoes
@@ -183,7 +199,7 @@ module gb (
     reg [7:0] wram_q;
     wire wram_sel = a[15:13] == 3'b110 || (a[15:13] == 3'b111 && a < 16'hFE00); // C000-FDFF (echo)
     always @(posedge clk) begin
-        if (wr_now && wram_sel && !dma_act) wram[wram_a] <= cpu_dout;
+        if (wr_now && wram_sel && !cpu_blk) wram[wram_a] <= cpu_dout;
         wram_q <= wram[wram_a];
     end
 
@@ -211,17 +227,20 @@ module gb (
     wire preg_sel = (a[15:4] == 12'hFF4 && (a[3:0] <= 4'hB && a[3:0] != 4'h6 || a[3:0] == 4'hF)) ||
                     (a >= 16'hFF68 && a <= 16'hFF6C);
     wire ppu_vblank, ppu_stat;
-    // ROM/cart RAM/WRAM (VRAM source unsupported); WRAM sources follow SVBK and the echo map via ma
-    wire [7:0] dma_data = dma_src[15:14] == 2'b11 ? wram_q : rom_sel ? ext_rd : cart_q;
+    // ROM/cart RAM/WRAM come over the external bus (WRAM follows SVBK and the echo map via ma).
+    // A VRAM source uses the PPU's CPU read path; the CPU is locked out of VRAM during DMA.
+    wire [7:0] dma_vq;
+    wire [7:0] dma_data = dma_src[15:14] == 2'b11 ? wram_q : dma_vram ? dma_vq : rom_sel ? ext_rd : cart_q;
     wire [7:0] hdma_data = hdma_src[15:13] == 3'b110 ? wram_q :
                            rom_sel ? ext_rd : cart_q;
 
     ppu ppu (
         .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release), .cgb_mode(cgb_mode),
         .cpu_addr(hdma_busy ? {3'b100, hdma_dst} : a),
-        .cpu_wr(hdma_busy ? hdma_put : wr_now && !(dma_act && oam_sel)),
+        .cpu_wr(hdma_busy ? hdma_put : wr_now && !cpu_blk),
         .cpu_din(hdma_busy ? hdma_data : cpu_dout), .cpu_dout(ppu_q),
         .vram_sel(hdma_busy || vram_sel), .vram_dma(hdma_busy),
+        .oam_dma_vram(dma_vram), .oam_dma_addr(dma_src[12:0]), .oam_dma_vq(dma_vq),
         .oam_sel(!hdma_busy && oam_sel), .reg_sel(!hdma_busy && preg_sel),
         .dma_act(dma_act), .dma_we(dma_act && ce), .dma_idx(dma_idx), .dma_data(dma_data),
         .irq_vblank(ppu_vblank), .irq_stat(ppu_stat), .hblank(ppu_hblank),
@@ -229,13 +248,16 @@ module gb (
     );
 
     always @(posedge clk) begin
-        if (rst) begin dma_act <= 0; dma_idx <= 0; dma_hi <= 0; end
+        if (rst) begin dma_act <= 0; dma_pend <= 0; dma_idx <= 0; dma_hi <= 0; dma_src_hi <= 0; end
         else begin
             if (ce && dma_act) begin
                 dma_idx <= dma_idx + 1;
                 if (dma_idx == 8'd159) dma_act <= 0;
             end
-            if (wr_now && a == 16'hFF46) begin dma_act <= 1; dma_hi <= cpu_dout; dma_idx <= 0; end
+            if (ce && dma_pend) begin
+                dma_pend <= 0; dma_act <= 1; dma_src_hi <= dma_hi; dma_idx <= 0;
+            end
+            if (wr_now && a == 16'hFF46) begin dma_pend <= 1; dma_hi <= cpu_dout; end
         end
     end
 

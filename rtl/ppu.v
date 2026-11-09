@@ -20,6 +20,9 @@ module ppu (
     output reg [7:0]  cpu_dout,
     input             vram_sel,
     input             vram_dma,    // CGB DMA owns VRAM even during mode 3
+    input             oam_dma_vram, // OAM DMA source is VRAM: read oam_dma_addr through the CPU port
+    input      [12:0] oam_dma_addr,
+    output     [7:0]  oam_dma_vq,
     input             oam_sel,
     input             reg_sel,     // FF40-FF45, FF47-FF4B, FF4F, FF68-FF6C
     input             dma_act,
@@ -66,14 +69,14 @@ module ppu (
     reg cpu_slot1, cpu_slot2;     // clk after ce: CPU read issue; clk after that: capture
     reg [7:0] cpu_vq;
     wire cpu_vwr = cpu_wr && vram_sel && (cpu_vram_ok || vram_dma);
-    wire cpu_vrd = cpu_slot1 && vram_sel && cpu_vram_ok;
+    wire cpu_vrd = cpu_slot1 && (vram_sel || oam_dma_vram) && cpu_vram_ok;
     wire cpu_owns = cpu_vwr || cpu_vrd;
     reg [13:0] ppu_va;            // driven combinationally below: {bank, offset}
     reg ppu_vreq;
     wire ppu_gnt = ce_t && ppu_vreq && !cpu_owns;
     always @(*) begin
         v_we = cpu_vwr;
-        v_addr = cpu_owns ? {vbk & cgb_mode, cpu_addr[12:0]} : ppu_va;
+        v_addr = cpu_owns ? {vbk & cgb_mode, oam_dma_vram ? oam_dma_addr : cpu_addr[12:0]} : ppu_va;
     end
     reg ppu_iss;                  // previous clk was a granted PPU issue
     reg [7:0] ppu_vhold;
@@ -85,6 +88,7 @@ module ppu (
         ppu_iss <= ppu_gnt;
         if (ppu_iss) ppu_vhold <= v_q;
     end
+    assign oam_dma_vq = cpu_vq;
 
     // ---------------- OAM (distributed) ----------------
     reg [7:0] oam0 [0:63], oam1 [0:63], oam2 [0:63], oam3 [0:63];
