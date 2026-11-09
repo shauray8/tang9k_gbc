@@ -14,7 +14,7 @@ talks to the bridge's UART endpoints directly over libusb (bundled with the tool
                            arrows = D-pad, Z = A, X = B, Enter = Start, Backspace/Shift = Select
   gbctl.py scanout         fingerprint of the frame actually sent to HDMI (changes => running)
   gbctl.py load --boot game.gb   same as load, but start through the CGB boot ROM (logo, DMG
-                           colourisation). Uses $GB_BOOT_ROM or SameBoy's open cgb_boot.bin.
+                           colourisation). Boot ROM choice: see BOOT_ROM below.
 """
 import ctypes, os, sys, time
 
@@ -30,8 +30,13 @@ KEYS = {"Right": "right", "Left": "left", "Up": "up", "Down": "down", "z": "a", 
 # UART rates: (27 MHz / baud divisor on the FPGA, FTDI divisor value, baud). Tried fastest first.
 SLOW = (234, 0x001A, 115_200)
 FAST = ((9, 0, 3_000_000), (18, 2, 1_500_000), (27, 3, 1_000_000), (54, 6, 500_000))
-BOOT_ROM = os.environ.get("GB_BOOT_ROM", os.path.join(ROOT, "..", "tools-ref", "SameBoy", "build",
-                                                      "bin", "BootROMs", "cgb_boot.bin"))
+# Boot ROM: $GB_BOOT_ROM, else your own dump at ../bootroms/cgb_boot.bin (2304 bytes, from a
+# Game Boy Color you own: Nintendo logo), else SameBoy's open-source boot ROM (SameBoy logo).
+BOOT_ROM = next((p for p in (os.environ.get("GB_BOOT_ROM"),
+                             os.path.join(ROOT, "..", "bootroms", "cgb_boot.bin"),
+                             os.path.join(ROOT, "..", "tools-ref", "SameBoy", "build", "bin",
+                                          "BootROMs", "cgb_boot.bin"))
+                 if p and os.path.exists(p)), "")
 BOOT_BASE = 0x3D0000   # boot ROM image in PSRAM; ROMs above this size run without it
 
 
