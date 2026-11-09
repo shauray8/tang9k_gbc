@@ -25,6 +25,7 @@ module gb (
     // Boot ROM (SameBoy's open CGB boot ROM) at PSRAM 3D0000, mapped at 0000-00FF and 0200-08FF
     // until FF50 is written. It picks CGB or DMG-compatibility mode itself via KEY0 (FF4C).
     input             boot_en,
+    output            boot_active,      // boot ROM still mapped (FF50 not yet written)
     // external cartridge memory (PSRAM via bridge)
     output     [21:0] ext_addr,
     output            ext_req,          // 1-clk pulse at M-cycle start
@@ -95,6 +96,7 @@ module gb (
             if (wr_now && boot_on && a == 16'hFF4C) key0_dmg <= cpu_dout[2];
             if (wr_now && boot_on && a == 16'hFF50) boot_on <= 0;
         end
+    assign boot_active = boot_on;
 
     // STOP arms an oscillator pause, not a derived clock. PPU dots continue
     // during speed switching; normal STOP also stops them until joypad wake.

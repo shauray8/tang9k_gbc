@@ -38,6 +38,7 @@ module video_buffer (
     input             lcd_on,
     input             gb_vsync,     // PPU: LY 153 -> 0 with the LCD on
     input             cgb_mode,
+    input      [9:0]  overlay,      // {on, sel[2:0], boot logo, palette[4:0]}, quasi-static
     input             pix_we,
     input      [7:0]  pix_x,
     input      [7:0]  pix_y,
@@ -141,15 +142,22 @@ module video_buffer (
     reg [10:0] hc;
     reg [9:0] vc, rbase, rptr;
     reg [2:0] sx, sy;
+    reg [7:0] gx, gy;               // GB pixel of rptr (overlay position)
     wire eol = hc == H_TOT - 11'd1;
     wire eof = eol && vc == V_TOT - 10'd1;
+    // Next-clock values of gx/gy (the overlay renderer reads the registered ones: its four
+    // stages then trail the ring data by three clocks, a uniform 3 HDMI pixel panel shift).
+    wire [7:0] gx_n = hc == X0 - 11'd1 ? 8'd0 :
+                      hc >= X0 && hc < X1 - 11'd1 && sx == 3'd4 ? gx + 8'd1 : gx;
+    wire [7:0] gy_n = eof ? 8'd0 : eol && vc < V_ACT && sy == 3'd4 ? gy + 8'd1 : gy;
     always @(posedge clk_pix) begin
         if (rst_pix) begin
-            hc <= 0; vc <= 0; vft <= 0; rbase <= 0; sy <= 0; rptr <= 0; sx <= 0;
+            hc <= 0; vc <= 0; vft <= 0; rbase <= 0; sy <= 0; rptr <= 0; sx <= 0; gx <= 0; gy <= 0;
         end else begin
             hc <= eol ? 11'd0 : hc + 11'd1;
             if (eol) vc <= eof ? 10'd0 : vc + 10'd1;
             if (eof) vft <= ~vft;
+            gx <= gx_n; gy <= gy_n;
             // ring slot base of the next video line: GB line = video line / 5, slot = GB line mod 6
             if (eof) begin rbase <= 0; sy <= 0; end
             else if (eol && vc < V_ACT) begin
@@ -169,14 +177,23 @@ module video_buffer (
     // ---------------- video domain: synchronized flags ----------------
     reg [1:0] lock_s, lcd_s, cgb_s;
     reg show, cgb_v;
+    // Overlay state: 2FF only. It changes on button presses; a change mid-frame can show a
+    // mixed value for a few pixels of one frame, which is invisible and saves a frame latch.
+    reg [9:0] ov_s0, ov_s1;
     always @(posedge clk_pix) begin
         lock_s <= {lock_s[0], locked};
         lcd_s <= {lcd_s[0], lcd_on};
         cgb_s <= {cgb_s[0], cgb_mode};
+        ov_s0 <= overlay; ov_s1 <= ov_s0;
         if (rst_pix) begin show <= 0; cgb_v <= 0; end
         else if (eof) begin show <= lock_s[1] && lcd_s[1]; cgb_v <= cgb_s[1]; end
         else if (!lock_s[1] || !lcd_s[1]) show <= 0;
     end
+    wire [1:0] ov_px;               // three clocks behind rq: the panel sits 3 HDMI pixels right
+    overlay_render ov_draw (
+        .clk(clk_pix), .gx(gx), .gy(gy), .on(ov_s1[9]), .sel(ov_s1[8:6]), .boot(ov_s1[5]),
+        .pal(ov_s1[4:0]), .px(ov_px)
+    );
 
     // ---------------- video domain: pipeline ----------------
     // S0: counters/rptr. S1: BRAM data + delayed flags. S2: registered RGB/DE/HS/VS outputs.
@@ -206,6 +223,9 @@ module video_buffer (
             de <= de1; hs <= hs1; vs <= vs1;
             win_out <= win1;
             if (!win1) {r, g, b} <= 24'h000000;
+            else if (ov_px == 2'd1) {r, g, b} <= 24'h182848;    // overlay panel
+            else if (ov_px == 2'd2) {r, g, b} <= 24'hF8F8F8;    // item text
+            else if (ov_px == 2'd3) {r, g, b} <= 24'hF8E030;    // selected item
             else if (!show) {r, g, b} <= cgb_v ? 24'hFFFFFF : 24'hE0F8D0;
             else if (cgb_v) {r, g, b} <= {c5(rq[4:0]), c5(rq[9:5]), c5(rq[14:10])};
             else case (rq[1:0])

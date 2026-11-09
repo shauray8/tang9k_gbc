@@ -7,9 +7,12 @@
 The launcher is itself a GBC game (host/arcade): a wall of game cards, seven per page, after
 GTA 2's character select. Left/right cycle through cards and pages, up/down change rows, A or
 Start plays; the Mac window searches. Card art: save an image beside the ROM with the same name
-(e.g. "Tetris (World).png"); see host/menu.py. F1 / Home, or holding Select + Start for two
-seconds in a game, saves the current game and returns to the
-library. Battery saves live beside each ROM as <ROM stem>.sav (cartridge RAM plus the
+(e.g. "Tetris (World).png"), or in an "art" folder beside the ROMs named with words from the
+title (e.g. "mario.jpeg"); see host/menu.py. F1 / Home, or holding Select + Start for two
+seconds in a game, saves the current game and returns to the library. In a game, the board's
+S2 button or Esc opens the FPGA's overlay menu (rtl/overlay.v): resume, save, library, reset,
+boot logo and the boot ROM colour palette for original Game Boy games; this launcher carries out
+save, library and the boot logo choice. Battery saves live beside each ROM as <ROM stem>.sav (cartridge RAM plus the
 standard 48-byte MBC3 clock footer). They are restored at launch and stored on Home,
 on switching games, on exit, and shortly after the game writes save RAM (at most once
 a minute; each save briefly pauses play). Games without a save start with blank RAM.
@@ -64,7 +67,7 @@ class Requests:
 class Library:
     AUTOSAVE_QUIET = 3        # seconds after the first observed cart-RAM write
     AUTOSAVE_INTERVAL = 60    # minimum seconds between in-game autosaves (each pauses play)
-    DIRTY_POLL = 2
+    GAME_POLL = 0.25          # in-game status query: overlay actions and cart-RAM writes
 
     def __init__(self, link, folder, covers=None):
         self.link, self.folder, self.covers = link, Path(folder), covers
@@ -225,7 +228,7 @@ class Library:
         if self._error is not None:
             return None
         if not self.active:
-            return self._autosave()
+            return self._in_game()
         events = self.decoder.feed(self.link.read(.005))
         if not events:
             return None
@@ -238,23 +241,45 @@ class Library:
         print(f'Launching {game.path.name}', flush=True)
         return self._run(game.title, lambda progress: self._switch(game.path, game, progress), game)
 
-    def _autosave(self):
-        """Cart-RAM writes mark a save; store it once writes settle, at most once a minute.
-        Clock state needs no periodic saves: reopening advances it by the elapsed time."""
-        if self.current is None or not self.current.ram_bytes or not self.current.battery \
-                or time.monotonic() < self.next_poll:
+    def _in_game(self):
+        """One status query per GAME_POLL: act on the FPGA overlay's request, and mark cart-RAM
+        writes for the autosave (stored once writes settle, at most once a minute). Clock state
+        needs no periodic saves: reopening advances it by the elapsed time."""
+        if self.current is None or time.monotonic() < self.next_poll:
             return None
         now = time.monotonic()
-        self.next_poll = now + self.DIRTY_POLL
+        self.next_poll = now + self.GAME_POLL
         try:
-            _, dirty = gbctl.core_pause(self.link, 2)
+            flags = gbctl.core_flags(self.link)
+            event = flags >> 5
+            if event:
+                gbctl.core_flags(self.link, 5)
         except gbctl.TransferError:
             return None               # retried at the next poll; play is unaffected
-        if dirty:
+        if event:
+            return self._overlay(event)
+        if not self.current.ram_bytes or not self.current.battery:
+            return None
+        if flags & 2:
             self.dirty_since = self.dirty_since or now
         if self.dirty_since is not None and now - self.dirty_since >= self.AUTOSAVE_QUIET \
                 and now - self.last_save >= self.AUTOSAVE_INTERVAL:
             return self._run(self.title, lambda progress: self._store(resume=True), "save")
+        return None
+
+    def _overlay(self, event):
+        """Overlay menu actions (rtl/overlay.v): 1 save, 2 library, 3 reset, 4/5 boot logo off/on."""
+        if event == 1:
+            if not self.current.persistent:
+                return f"{self.title} has no battery save | F1 / Home returns to library"
+            return self._run(self.title, lambda progress: self._store(resume=True), "save")
+        if event == 2:
+            return self.home()
+        if event == 3:
+            return f"Reset {self.title} | F1 / Home saves and returns to library"
+        if event in (4, 5):
+            gbctl.boot_preference = event == 5
+            return f"Boot logo {'on' if event == 5 else 'off'} from the next start | F1 / Home returns to library"
         return None
 
     def close(self):

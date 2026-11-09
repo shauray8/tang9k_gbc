@@ -225,14 +225,20 @@ class UploadCancelled(RuntimeError):
     pass
 
 
+# Boot logo preference for the next game start; the in-game overlay can change it.
+boot_preference = os.environ.get("GB_BOOT") != "off"
+
+
 def set_boot(link, rom_size):
-    """Map the CGB boot ROM for the next game start; returns whether it is enabled."""
+    """Map the CGB boot ROM for the next game start; returns whether it is enabled. The image is
+    uploaded even when the logo is off, so the overlay can turn it on for a reset."""
     data = open(BOOT_ROM, "rb").read() if os.path.exists(BOOT_ROM) else b""
-    on = len(data) == 0x900 and rom_size <= BOOT_BASE and os.environ.get("GB_BOOT") != "off"
+    usable = len(data) == 0x900 and rom_size <= BOOT_BASE
+    on = usable and boot_preference
     frozen = core_pause(link, 2)[0]   # the launcher keeps the core frozen across a load
     core_pause(link, 1)
     try:
-        if on:
+        if usable:
             write_memory(link, BOOT_BASE, data)
     finally:
         core_pause(link, 3 if on else 4)
@@ -288,17 +294,24 @@ class TransferError(RuntimeError):
     pass
 
 
-def core_pause(link, state):
-    """state 1 freezes, 0 resumes, 2 queries -> (frozen, dirty cart RAM since the last freeze)."""
+def core_flags(link, state=2):
+    """'P' <state> -> the raw 'p' flags byte: {overlay event[2:0], overlay open, 0, boot logo,
+    dirty cart RAM since the last freeze, frozen}. States: 0 resume, 1 freeze, 2 query,
+    3/4 boot logo on/off, 5 acknowledge the overlay event."""
     for _ in range(3):
         link.read(0.02)
         link.write(bytes((ord("P"), state)))
         reply = link.read(0.5, lambda d: len(d) >= 2 and d[-2:-1] == b"p")
         k = reply.rfind(b"p")
         if k >= 0 and k + 1 < len(reply):
-            flags = reply[k + 1]
-            return bool(flags & 1), bool(flags & 2)
+            return reply[k + 1]
     raise TransferError("no reply to freeze/resume; is the save-capable design loaded?")
+
+
+def core_pause(link, state):
+    """state 1 freezes, 0 resumes, 2 queries -> (frozen, dirty cart RAM since the last freeze)."""
+    flags = core_flags(link, state)
+    return bool(flags & 1), bool(flags & 2)
 
 
 def _header(op, addr, n):
@@ -367,7 +380,7 @@ def play(link, library=None):
         if (library is None or library.can_control) and (force or state != last[0]):
             link.write(bytes([ord("J"), state]))
             last[0] = state
-        lab.config(text="arrows=D-pad  Z=A  X=B  Enter=Start  Backspace=Select\n\nheld: "
+        lab.config(text="arrows=D-pad  Z=A  X=B  Enter=Start  Backspace=Select  Esc=menu\n\nheld: "
                         + (" ".join(sorted(held)) or "-")
                         + ("\n\n" + status_line[0] if status_line[0] else ""))
         if home_button is not None:
@@ -377,6 +390,10 @@ def play(link, library=None):
 
     def down(e):
         if isinstance(e.widget, tk.Entry) or library is not None and library.busy:
+            return
+        if e.keysym == "Escape":                  # the FPGA's in-game overlay menu
+            if library is None or library.can_control:
+                link.write(b"O")
             return
         b = KEYS.get(e.keysym)
         if b:

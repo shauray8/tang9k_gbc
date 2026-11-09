@@ -25,6 +25,7 @@ class FakeFPGA:
         self.out = bytearray()
         self.frozen = False
         self.dirty = False
+        self.overlay_event = 0         # pending in-game overlay request (rtl/overlay.v)
         self.clock = (0, 0, 0, 0, 0)
         self.rom_left = None
         self.rom_sum = 0
@@ -92,7 +93,9 @@ class FakeFPGA:
                     self.frozen, self.dirty = True, False
                 elif cmd[1] == 0:
                     self.frozen = False
-                self.out += b'p' + bytes((self.dirty << 1 | self.frozen,))
+                elif cmd[1] == 5:
+                    self.overlay_event = 0
+                self.out += b'p' + bytes((self.overlay_event << 5 | self.dirty << 1 | self.frozen,))
             elif op in b'AB' and self.frozen:
                 addr = cmd[1] << 16 | cmd[2] << 8 | cmd[3]
                 n = (cmd[4] << 8 | cmd[5]) or 0x10000
@@ -205,7 +208,7 @@ class SaveTests(unittest.TestCase):
         self.launch('Alpha.gbc')
         self.service.AUTOSAVE_QUIET = 0
         self.service.AUTOSAVE_INTERVAL = 0
-        self.service.DIRTY_POLL = 0
+        self.service.GAME_POLL = 0
         self.assertIsNone(self.service.poll())                 # clean: no save
         self.fpga.game_writes(0x66, 0x2000)
         self.service.poll()
@@ -213,6 +216,39 @@ class SaveTests(unittest.TestCase):
         self.assertEqual((self.folder / 'Alpha.sav').read_bytes(), b'\x66' * 0x2000)
         self.assertFalse(self.fpga.frozen)
         self.assertFalse(self.service.active)
+
+    def test_overlay_save_then_library(self):
+        self.launch('Alpha.gbc')
+        self.service.GAME_POLL = 0
+        self.fpga.game_writes(0x77, 0x2000)
+        self.fpga.overlay_event = 1                            # SAVE
+        self.service.poll()
+        self.finish()
+        self.assertEqual((self.folder / 'Alpha.sav').read_bytes(), b'\x77' * 0x2000)
+        self.assertEqual(self.fpga.overlay_event, 0, 'request not acknowledged')
+        self.assertFalse(self.fpga.frozen)
+        self.assertFalse(self.service.active)                  # still playing
+        self.fpga.game_writes(0x78, 0x2000)
+        self.fpga.overlay_event = 2                            # LIBRARY: save, then the menu
+        self.service.poll()
+        self.finish()
+        self.assertTrue(self.service.active)
+        self.assertEqual((self.folder / 'Alpha.sav').read_bytes(), b'\x78' * 0x2000)
+
+    def test_overlay_boot_logo_sets_next_start(self):
+        self.launch('Alpha.gbc')
+        self.service.GAME_POLL = 0
+        before = launcher.gbctl.boot_preference
+        try:
+            self.fpga.overlay_event = 4
+            self.service.poll()
+            self.assertFalse(launcher.gbctl.boot_preference)
+            self.fpga.overlay_event = 5
+            self.service.poll()
+            self.assertTrue(launcher.gbctl.boot_preference)
+            self.assertEqual(self.fpga.overlay_event, 0)
+        finally:
+            launcher.gbctl.boot_preference = before
 
     def test_controls_blocked_until_upload_completion_consumed(self):
         self.fpga.load_gate = threading.Event()

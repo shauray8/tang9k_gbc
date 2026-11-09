@@ -66,12 +66,20 @@ module top (
     wire test_req, test_we, test_done, test_pass;
     wire [21:0] test_addr;            // holds the failing address once a test fails
     wire [7:0] test_wd, test_expected, test_actual;
+`ifdef RELEASE
+    // Release images are qualified with sim/hwstress before they ship, which covers far more
+    // than the power-on pattern test; dropping it frees its LUTs and bus-mux inputs.
+    assign {test_req, test_we, test_done, test_pass} = {2'b00, 1'b1, p_ready};
+    assign test_addr = 22'd0;
+    assign {test_wd, test_expected, test_actual} = 24'd0;
+`else
     psram_test memtest (
         .clk(clk_sys), .rst(rst || btn_sync[15]), .ready(p_ready), .busy(b_busy), .rd(b_rd),
         .req(test_req), .we(test_we), .addr(test_addr), .wd(test_wd),
         .done(test_done), .passed(test_pass), .fail_addr(),
         .expected(test_expected), .actual(test_actual)
     );
+`endif
     wire fl_rst = rst || !p_ready || !test_pass || btn_sync[15];
     reg fl_rst_d;
     always @(posedge clk_sys) fl_rst_d <= fl_rst;
@@ -96,7 +104,9 @@ module top (
     // ---------------- USB-UART (BL702, 115200 8N1) ----------------
     // 'J' <buttons>; 'L' <whole .gb image> -> 'K' <8-bit sum> (length taken from header 0x148);
     // 'F' = post-scaler fingerprint. Replies are serialized through one queue.
-    // 'P' <0|1|2>: resume / freeze / query the core -> 'p' <{dirty cart RAM, frozen}>.
+    // 'P' <0|1|2>: resume / freeze / query the core -> 'p' <flags>:
+    //   {overlay event[2:0], overlay open, 0, boot logo, dirty cart RAM, frozen}.
+    // 'P' 5 acknowledges the overlay event. 'O' opens the in-game overlay (rtl/overlay.v).
     // A/B/T/U (cartridge RAM and MBC3 clock transfer, frozen core only): see rtl/host_mem.v.
     // 'Q' <div>: switch both UART directions to 27 MHz / div once the reply queue drains.
     // A new rate stays on probation until an 'S' arrives at it; ~1.2 s without one falls
@@ -115,7 +125,7 @@ module top (
     // TX queue: 'L' done -> 'K' <sum>; 'S' -> 'S' <flags> <load addr[21:14]> <PC[15:8]>
     //   flags = {psram_ready, load_done, flash_busy, lcd_on, video_locked, waitlock, cart_type[1:0]}
     reg [3:0] tq;                 // bytes left to send
-    reg [2:0] tq_s;               // 0 load, 1 status, 2 memory, 3 header, 4 scanout
+    reg [2:0] tq_s;               // 0 load, 1 status, 2 memory, 3 header, 4 scanout, 5 menu, 6 hello, 7 pause
     wire [15:0] scanout_sig; wire [7:0] scanout_frame;
     reg [23:0] scanout_reply;
     wire tx_rdy;
@@ -139,17 +149,27 @@ module top (
     // Freeze gates the core's clock enables. Resume first reissues the held bus access,
     // then waits until its reply is valid before the core advances again.
     // 'P' 3/4 enables/disables the boot ROM (uploaded to 3D0000) for the next game start.
+    // The overlay holds the core too; it resumes only when neither the host nor the overlay holds.
     reg freeze, dirty, boot_en;
     reg [4:0] resume_cnt;
-    wire core_hold = freeze || resume_cnt != 0;
+    wire ov_on, ov_boot_toggle, ov_ev_valid;
+    wire [7:0] ov_ev_code;
+    reg ov_on_d, host_open, ov_ack;
+    wire ov_close = ov_on_d && !ov_on;
+    wire core_hold = freeze || ov_on || resume_cnt != 0;
     wire bus_resume = resume_cnt == 5'd20;
     wire hm_tx_we, hm_req, hm_we, rtc_load; wire [7:0] hm_tx_d, hm_wd;
     wire [21:0] hm_addr; wire [39:0] rtc_d, rtc_live;
     always @(posedge clk_sys) begin
+        ov_on_d <= ov_on;
+        host_open <= 0;
+        ov_ack <= 0;
         if (rst) begin us <= S_CMD; ubtn <= 0; idle <= 0; tq <= 0;
                        freeze <= 0; resume_cnt <= 0; dirty <= 0; boot_en <= 0;
                        udiv <= 9'd234; baud_switch <= 0; probation <= 0; end
         else begin
+            if (ov_close && !freeze) resume_cnt <= 5'd20;
+            if (ov_boot_toggle) boot_en <= !boot_en;
             if (tq != 0 && tx_rdy) tq <= tq - 1;
             idle <= u_v ? 22'd0 : (idle[21] ? idle : idle + 1);
             if (idle[21] && us != S_CMD) us <= S_CMD;          // ~78 ms gap aborts 'J'/'L'/'V'
@@ -169,6 +189,7 @@ module top (
             if (u_v && !hm_busy) case (us)
                 S_CMD: if (u_d == "J") us <= S_JOY;
                        else if (u_d == "L") us <= S_ROM;
+                       else if (u_d == "O") host_open <= 1;
                        else if (tq != 0) ;
                        else if (u_d == "P") us <= S_PAUSE;
                        else if (u_d == "Q") us <= S_BAUD;
@@ -189,9 +210,10 @@ module top (
                 S_PAUSE: begin
                     us <= S_CMD; tq <= 2; tq_s <= 7;
                     if (u_d == 8'd1 && !freeze) begin freeze <= 1; dirty <= 0; end
-                    else if (u_d == 8'd0 && freeze) begin freeze <= 0; resume_cnt <= 5'd20; end
+                    else if (u_d == 8'd0 && freeze) begin freeze <= 0; if (!ov_on) resume_cnt <= 5'd20; end
                     else if (u_d == 8'd3) boot_en <= 1;
                     else if (u_d == 8'd4) boot_en <= 0;
+                    else if (u_d == 8'd5) ov_ack <= 1;
                 end
                 default: ;
             endcase
@@ -231,7 +253,7 @@ module top (
         7'b110_0010: tx_d = "M";
         7'b110_0001: tx_d = 8'h01; // launcher protocol version
         7'b111_0010: tx_d = "p";
-        7'b111_0001: tx_d = {5'd0, boot_en, dirty, freeze};
+        7'b111_0001: tx_d = {ov_ev_valid ? ov_ev_code[2:0] : 3'd0, ov_on, 1'b0, boot_en, dirty, freeze};
         default: tx_d = pc[15:8];
     endcase
     uart_tx utx (.clk(clk_sys), .rst(rst), .div(udiv), .tx(uart_tx), .ready(tx_rdy), .idle(tx_idle),
@@ -258,13 +280,18 @@ module top (
 
     // Post-load self-check: read back header bytes 0x104/0x105 (0xCE 0xED in every valid ROM)
     // before the core runs; reported by the D (logo_ok) and H (both bytes) UART commands.
+    // A release build has neither command, so it only waits for the last load write.
     reg [2:0] vst;                // 0 wait load, 1/3 issue, 2/4 wait reply, 5 done
     reg logo_ok;
     reg [7:0] rb0, rb1;
     always @(posedge clk_sys) begin
         if (rst || !ld_done) begin vst <= 0; logo_ok <= 0; rb0 <= 0; rb1 <= 0; end
         else case (vst)
+`ifdef RELEASE
+            3'd0: if (!b_busy) vst <= 3'd5;
+`else
             3'd0: if (!b_busy) vst <= 3'd1;
+`endif
             3'd1, 3'd3: vst <= vst + 1;
             3'd2: if (!b_busy) begin rb0 <= b_rd; logo_ok <= b_rd == 8'hCE; vst <= 3'd3; end
             3'd4: if (!b_busy) begin rb1 <= b_rd; vst <= 3'd5; end
@@ -276,13 +303,36 @@ module top (
     // ---------------- Game Boy ----------------
     wire pix_we; wire [1:0] pix; wire [14:0] pix_rgb; wire [7:0] px, py;
     wire gb_vsync, tick, tick_fast;
-    wire [7:0] jb = joy | ubtn | {btn_sync[14], 7'b0};   // {start, select, b, a, down, up, left, right}
-    wire gb_rst = rst || loading || btn_sync[15];
+    wire [7:0] jb = joy | ubtn;          // {start, select, b, a, down, up, left, right}
+    // S2 opens the overlay (bounce only re-opens an open overlay, which is a no-op).
+    reg s2_d;
+    always @(posedge clk_sys) s2_d <= btn_sync[14];
+    wire [7:0] core_pad; wire [2:0] ov_sel; wire [4:0] ov_pal; wire ov_reset, boot_active;
+    // The boot ROM choice applies from the next core reset: boot_en is only the preference
+    // (host 'P' 3/4, overlay toggle); boot_run is what the running game was started with.
+    reg boot_run;
+    overlay_ctl overlay (
+        .clk(clk_sys), .rst(rst), .enable(vst == 3'd5 && test_pass),
+        .open(host_open || (btn_sync[14] && !s2_d)), .close_all(u_start || fl_start),
+        .pad(jb), .cart_cgb(cgb_mode), .boot_active(boot_active), .boot_run(boot_run), .boot_en(boot_en),
+        .on(ov_on), .sel(ov_sel), .pal(ov_pal), .core_reset(ov_reset), .boot_toggle(ov_boot_toggle),
+        .core_pad(core_pad), .ev_valid(ov_ev_valid), .ev_code(ov_ev_code),
+        .ev_take(ov_ack)
+    );
+    // Overlay reset: 64 clocks, so a bus request still in flight completes before the
+    // core's first fetch (the bridge drops requests while busy).
+    reg [5:0] ov_rst_cnt;
+    always @(posedge clk_sys)
+        if (rst) ov_rst_cnt <= 0;
+        else if (ov_reset) ov_rst_cnt <= 6'd63;
+        else if (ov_rst_cnt != 0) ov_rst_cnt <= ov_rst_cnt - 6'd1;
+    wire gb_rst = rst || loading || btn_sync[15] || ov_rst_cnt != 0;
+    always @(posedge clk_sys) if (gb_rst) boot_run <= boot_en;
     wire g_req, g_we; wire [21:0] g_addr; wire [7:0] g_wd;
     gb core (
         .clk(clk_sys), .rst(gb_rst), .clk_en(tick), .clk_en_fast(tick_fast), .hold(core_hold),
-        .buttons(jb),
-        .cgb_mode(cgb_mode), .boot_en(boot_en),
+        .buttons(core_pad),
+        .cgb_mode(cgb_mode), .boot_en(boot_run), .boot_active(boot_active),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
         .lcd_on(lcd_on),
         .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram), .cart_mbc2(cart_mbc2),
@@ -304,7 +354,8 @@ module top (
     wire [7:0] vr, vg, vb; wire vde, vhs, vvs;
     video_buffer vbuf (
         .clk_sys(clk_sys), .rst_sys(rst), .run(!gb_rst), .lcd_on(lcd_on), .gb_vsync(gb_vsync),
-        .cgb_mode(cgb_mode || boot_en),   // booted carts always output RGB (CGB or DMG-compat colours)
+        .cgb_mode(cgb_mode || boot_run),  // booted carts always output RGB (CGB or DMG-compat colours)
+        .overlay({ov_on, ov_sel, boot_en, ov_pal}),
         .pix_we(pix_we), .pix_x(px), .pix_y(py), .pix(pix), .pix_rgb(pix_rgb),
         .tick(tick), .tick_fast(tick_fast), .locked(locked_v), .waitlock(waitlock),
         .clk_pix(clk_pix), .rst_pix(vrst),
