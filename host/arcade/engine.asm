@@ -52,6 +52,9 @@ DEF PAL_HIDDEN EQU 5         ; cards not loaded yet: flat wall colour
 DEF R_PAL    EQU CARD_TILES * 16
 DEF R_BANNER EQU R_PAL + 8   ; 2 x 20 bank-1 tile numbers (tall font, banner pieces)
 DEF R_PLAY   EQU R_BANNER + 40
+DEF R_NLEN   EQU R_PLAY + 1  ; name length in characters
+DEF R_NAME   EQU R_PLAY + 2  ; up to 64 tall-font top tiles, scrolled when longer than 17
+DEF NAME_COLS EQU 17         ; banner columns 1-17 show the name
 
 DEF FRAME_TILE EQU 252       ; 8x16 sprites: horizontal edge pair, vertical edge pair
 
@@ -73,6 +76,8 @@ wPressed: ds 1
 wLaunch:  ds 1     ; 0 idle, >0 launch blink countdown, $FF sent
 wFx:      ds 1     ; selected card position, screen pixels
 wFy:      ds 1
+wScroll:  ds 1     ; first name character shown in the banner
+wScrollWait: ds 1  ; frames until the next scroll step
 wEnd:
 
 SECTION "header", ROM0[$100]
@@ -201,6 +206,7 @@ MainLoop:
     ld [wBannerDirty], a
     call DrawBanner
 .nobanner:
+    call ScrollBanner
     ld a, [wLoad]
     cp PAGE
     jr nc, .loaded
@@ -489,6 +495,10 @@ CardAttr:
 
 ; ---------------- banner (map rows 16-17, tall font) ----------------
 DrawBanner:
+    xor a
+    ld [wScroll], a
+    ld a, 60                    ; a second on the start of the name, then scroll
+    ld [wScrollWait], a
     ld hl, LOAD_TEXT
     ld a, [wLaunch]
     or a
@@ -848,6 +858,73 @@ Put:
     ld [hl+], a
     ld [hl], 0
     inc hl
+    ret
+
+; long names move along the banner one character at a time, holding at either end
+ScrollBanner:
+    ld a, [wLaunch]
+    or a
+    ret nz
+    ld a, [wOnPage]
+    or a
+    ret z
+    ld hl, wScrollWait
+    dec [hl]
+    ret nz
+    ld [hl], 1
+    ld a, [wSel]
+    ld l, a
+    call SlotIndex
+    call Record
+    push hl
+    ld de, R_NLEN
+    add hl, de
+    ld a, [hl]
+    pop hl
+    sub NAME_COLS + 1
+    ret c                       ; fits: never scrolls
+    inc a
+    ld b, a                     ; last offset
+    ld a, [wScroll]
+    cp b
+    jr c, .step
+    xor a                       ; held at the end: back to the start
+    ld c, 60
+    jr .set
+.step:
+    inc a
+    ld c, 12
+    cp b
+    jr nz, .set
+    ld c, 90                    ; reached the end: hold it
+.set:
+    ld [wScroll], a
+    ld e, a
+    ld a, c
+    ld [wScrollWait], a
+    ld d, 0
+    add hl, de
+    ld de, R_NAME
+    add hl, de
+    push hl
+    ld de, $9800 + 16 * 32 + 1
+    ld b, NAME_COLS
+.top:
+    ld a, [hl+]
+    ld [de], a
+    inc de
+    dec b
+    jr nz, .top
+    pop hl
+    ld de, $9800 + 17 * 32 + 1
+    ld b, NAME_COLS
+.bottom:
+    ld a, [hl+]
+    inc a                       ; bottom half of each tall character
+    ld [de], a
+    inc de
+    dec b
+    jr nz, .bottom
     ret
 
 ; card positions (screen pixels, top-left), shared with menu.py's CARDS

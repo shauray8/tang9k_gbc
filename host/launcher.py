@@ -18,12 +18,24 @@ is required. This does not emulate the SD wire protocol. Transfers run on one
 background worker with visible progress and exclusive USB ownership.
 """
 import argparse
+import importlib
 from pathlib import Path
 import threading
 import time
 import gbctl
 import saves
 import menu
+
+
+def current_menu():
+    """menu.py and engine.bin change together: pick up a newer menu.py, or a long-running
+    launcher pairs its old builder with the new engine and the card wall comes out garbled."""
+    global menu
+    stamp = Path(menu.__file__).stat().st_mtime_ns
+    if getattr(menu, '_loaded_stamp', stamp) != stamp:
+        menu = importlib.reload(menu)
+    menu._loaded_stamp = stamp
+    return menu
 
 
 class Requests:
@@ -83,9 +95,10 @@ class Library:
         return not self.busy and self._error is None
 
     def prepare(self):
-        catalog = menu.library(self.folder)
-        games = menu.filter_games(catalog, self.query)
-        image = menu.build(games, self.covers, query=self.query, total=len(catalog))
+        build = current_menu()
+        catalog = build.library(self.folder)
+        games = build.filter_games(catalog, self.query)
+        image = build.build(games, self.covers, query=self.query, total=len(catalog))
         self.total = len(catalog)
         self.image.parent.mkdir(parents=True, exist_ok=True)
         self.image.write_bytes(image)

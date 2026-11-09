@@ -110,7 +110,9 @@ def tile_bytes(pixels):
     return bytes(out)
 
 
-ART_W, ART_H = 32, 40
+ART_W, ART_H = 32, 40                         # card slot (4x5 tiles)
+GAP = 2                                       # concrete border per side: 4 px between cards
+PIC_W, PIC_H = ART_W - 2*GAP, ART_H - 2*GAP   # the picture inside it, in 3 colours
 IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.heic', '.tif', '.tiff')
 ART_CACHE = ROOT / 'build/launcher/art-cache'
 
@@ -152,20 +154,20 @@ def _read_bmp(data):
 
 
 def _image_rgb(path):
-    """Centre-crop to 4:5 and scale to 32x40 with sips; returns 40 rows of (r, g, b)."""
+    """Centre-crop to 4:5 and scale to the picture size with sips; returns rows of (r, g, b)."""
     info = subprocess.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', str(path)],
                           capture_output=True, text=True, check=True).stdout
     w = int(re.search(r'pixelWidth: (\d+)', info).group(1))
     h = int(re.search(r'pixelHeight: (\d+)', info).group(1))
-    cw, ch = (h*ART_W // ART_H, h) if w*ART_H > h*ART_W else (w, w*ART_H // ART_W)
+    cw, ch = (h*PIC_W // PIC_H, h) if w*PIC_H > h*PIC_W else (w, w*PIC_H // PIC_W)
     with tempfile.TemporaryDirectory() as tmp:
         crop, out = Path(tmp) / 'crop.png', Path(tmp) / 'art.bmp'
         subprocess.run(['sips', '-s', 'format', 'png', '-c', str(ch), str(cw), str(path),
                         '--out', str(crop)], capture_output=True, check=True)
-        subprocess.run(['sips', '-s', 'format', 'bmp', '-z', str(ART_H), str(ART_W), str(crop),
+        subprocess.run(['sips', '-s', 'format', 'bmp', '-z', str(PIC_H), str(PIC_W), str(crop),
                         '--out', str(out)], capture_output=True, check=True)
         rows = _read_bmp(out.read_bytes())
-    if len(rows) != ART_H or len(rows[0]) != ART_W:
+    if len(rows) != PIC_H or len(rows[0]) != PIC_W:
         raise ValueError(f'{path}: sips produced {len(rows[0])}x{len(rows)}')
     return rows
 
@@ -174,16 +176,16 @@ def _luma(c):
     return c[0]*3 + c[1]*6 + c[2]
 
 
-def _quantize(rows):
-    """Four representative colours (k-means), darkest first, and per-pixel indices."""
+def _quantize(rows, k=3):
+    """k representative colours (k-means), darkest first, and per-pixel indices."""
     pixels = [p for row in rows for p in row]
     ordered = sorted(pixels, key=_luma)
-    centres = [ordered[len(ordered)*(2*i+1)//8] for i in range(4)]
+    centres = [ordered[len(ordered)*(2*i+1)//(2*k)] for i in range(k)]
     for _ in range(16):
-        sums = [[0, 0, 0, 0] for _ in range(4)]
+        sums = [[0, 0, 0, 0] for _ in range(k)]
         for p in pixels:
-            k = min(range(4), key=lambda i: sum((a-b)**2 for a, b in zip(p, centres[i])))
-            s = sums[k]
+            n = min(range(k), key=lambda i: sum((a-b)**2 for a, b in zip(p, centres[i])))
+            s = sums[n]
             s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; s[3] += 1
         moved = [(s[0]//s[3], s[1]//s[3], s[2]//s[3]) if s[3] else centres[i]
                  for i, s in enumerate(sums)]
@@ -191,14 +193,14 @@ def _quantize(rows):
             break
         centres = moved
     centres.sort(key=_luma)
-    index = [[min(range(4), key=lambda i: sum((a-b)**2 for a, b in zip(p, centres[i])))
+    index = [[min(range(k), key=lambda i: sum((a-b)**2 for a, b in zip(p, centres[i])))
               for p in row] for row in rows]
     return ['#%02X%02X%02X' % c for c in centres], index
 
 
 def image_art(path):
     st = path.stat()
-    key = hashlib.sha1(f'{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{ART_W}x{ART_H}'.encode()).hexdigest()
+    key = hashlib.sha1(f'{path.resolve()}|{st.st_mtime_ns}|{st.st_size}|{PIC_W}x{PIC_H}x3'.encode()).hexdigest()
     cached = ART_CACHE / f'{key}.json'
     if cached.exists():
         data = json.loads(cached.read_text())
@@ -237,42 +239,63 @@ def procedural_art(game):
     return palette, pixels
 
 
-def pinned(pixels):
-    """GTA 2 photo look: a 1 px border in the card's lightest colour and a pin at the top."""
-    out = [row[:] for row in pixels]
-    for x in range(ART_W):
-        out[0][x] = out[ART_H-1][x] = 3
-    for y in range(ART_H):
-        out[y][0] = out[y][ART_W-1] = 3
-    for y, x in ((1, 15), (1, 16), (2, 15), (2, 16)):
-        out[y][x] = 0
-    return out
+def _rgb(color):
+    return tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+
+
+def three_colours(palette, pixels):
+    """Four-colour 32x40 art (procedural or .json) as a three-colour picture: nearest-neighbour
+    resample, then merge the two closest colours (weighted by how many pixels use them)."""
+    pixels = [[pixels[y*ART_H//PIC_H][x*ART_W//PIC_W] for x in range(PIC_W)] for y in range(PIC_H)]
+    counts = [sum(row.count(i) for row in pixels) for i in range(4)]
+    rgb = [_rgb(c) for c in palette]
+    a, b = min(((i, j) for i in range(4) for j in range(i+1, 4)),
+               key=lambda p: sum((u-v)**2 for u, v in zip(rgb[p[0]], rgb[p[1]])))
+    total = max(counts[a] + counts[b], 1)
+    merged = '#%02X%02X%02X' % tuple((u*counts[a] + v*counts[b]) // total
+                                       for u, v in zip(rgb[a], rgb[b]))
+    keep = [i for i in range(4) if i not in (a, b)]
+    colours = [merged] + [palette[i] for i in keep]
+    remap = {a: 0, b: 0, keep[0]: 1, keep[1]: 2}
+    return colours, [[remap[c] for c in row] for row in pixels]
 
 
 def _by_luma(palette, pixels):
-    """Order the four colours darkest first, so every card dims with the one shared grey palette."""
-    luma = [_luma(tuple(int(c[i:i+2], 16) for i in (1, 3, 5))) for c in palette]
-    order = sorted(range(4), key=luma.__getitem__)
+    """Order the colours darkest first, so every card dims with the one shared grey palette."""
+    order = sorted(range(len(palette)), key=lambda i: _luma(_rgb(palette[i])))
     remap = {old: new for new, old in enumerate(order)}
     return [palette[i] for i in order], [[remap[c] for c in row] for row in pixels]
+
+
+def bordered(pixels):
+    """The card: a 2 px concrete border (colour 0) around the picture (colours 1-3), which has
+    GTA 2's photo look: a 1 px edge in its lightest colour and a dark pin at the top."""
+    out = [[0]*ART_W for _ in range(ART_H)]
+    for y in range(PIC_H):
+        for x in range(PIC_W):
+            edge = x in (0, PIC_W-1) or y in (0, PIC_H-1)
+            out[GAP+y][GAP+x] = 3 if edge else pixels[y][x] + 1
+    for y, x in ((1, 13), (1, 14), (2, 13), (2, 14)):
+        out[GAP+y][GAP+x] = 1
+    return out
 
 
 def cover(game, folder=None):
     """(320 bytes of 32x40 tiles, 8-byte RGB555 palette) for one game card."""
     path = art_source(game, folder)
     if path is None:
-        palette, pixels = procedural_art(game)
+        palette, pixels = three_colours(*procedural_art(game))
     elif path.suffix == '.json':
         data = json.loads(path.read_text())
         palette, rows = data['palette'], data['pixels']
         if len(palette) != 4 or len(rows) != ART_H or any(
                 len(row) != ART_W or set(row)-set('0123') for row in rows):
             raise ValueError(f'{path}: card art requires four colours and 32x40 pixels using 0..3')
-        pixels = [[int(c) for c in row] for row in rows]
+        palette, pixels = three_colours(palette, [[int(c) for c in row] for row in rows])
     else:
         palette, pixels = image_art(path)
     palette, pixels = _by_luma(palette, pixels)
-    return tile_bytes(pinned(pixels)), palettes(palette)
+    return tile_bytes(bordered(pixels)), palettes([WALL[0]] + palette)
 
 
 def text(value, width=20):
@@ -288,11 +311,13 @@ BLANK_RECORD, GAME_COUNT, LAST_PAGE = 0x3C80, 0x3FF0, 0x3FF2
 RECORD, PER_BANK, PAGE, CARD_TILES = 512, 32, 7, 20
 WALL_FIRST, WALL_LAST, FRAME_TILE = 96, 251, 252   # bank 0 tile numbers
 BANK1_FIRST = PAGE * CARD_TILES                    # bank 1 tiles after the card art: 140-255
-# engine's CardPos: GTA 2's six spots (two up, four down) plus a third top card
+# engine's CardPos: three up, four down at uneven heights like GTA 2; the slots touch and each
+# card's own concrete border makes the gaps
 CARDS = [(48, 16), (80, 24), (112, 16), (16, 80), (48, 72), (80, 80), (112, 72)]
+NAME_COLS, NAME_MAX = 17, 64                       # banner columns 1-17; longer names scroll
 
 WALL = ['#313131', '#212121', '#424242', '#000000']    # concrete, dark, light, black stains
-DIM = ['#000000', '#212121', '#424242', '#636363']     # every unselected card (darkest first)
+DIM = ['#313131', '#080808', '#4A4A4A', '#7B7B7B']     # every unselected card: border, picture darkest first
 TITLE = ['#313131', '#F7E731', '#636363', '#000000']   # yellow heading on concrete
 BANNER = ['#D64221', '#630010', '#F7F700', '#000000']  # red, dark red, yellow line, text
 FRAME = ['#000000', '#F7F7F7', '#B5B5B5', '#212121']   # colour 0 transparent
@@ -334,7 +359,7 @@ def wall_image():
         for y in range(cy-r-2, cy+r+3):
             for x in range(cx-r-2, cx+r+3):
                 d = (x-cx)**2 + (y-cy)**2
-                if 0 <= x < 160 and 0 <= y < 128:
+                if 0 <= x < 168 and 0 <= y < 128:
                     if d <= r*r:
                         img[y][x] = 3
                     elif d <= (r+1)**2 and rnd.random() < 0.5:
@@ -410,35 +435,44 @@ def bank1_tiles():
     return bytes(data), codes
 
 
+def banner_name(title):
+    return ''.join(c if c in TALL else ' ' for c in title.upper())[:NAME_MAX].strip()
+
+
 def banner_rows(name, codes):
-    """Two 20-byte map rows: start, name (up to 14 characters), divider, hatching, end."""
-    name = ''.join(c if c in TALL else ' ' for c in name.upper())[:14].rstrip()
-    cols = ['start'] + list(name) + ['div']
-    while len(cols) < 18:
-        cols.append('hatch' if len(cols) % 2 == 0 else 'plain')
+    """Two 20-byte map rows. A short name gets GTA 2's divider and hatching after it; a long
+    one fills columns 1-17 (the engine scrolls the rest through)."""
+    name = banner_name(name)
+    if len(name) <= 14:
+        cols = ['start'] + list(name) + ['div']
+        while len(cols) < 18:
+            cols.append('hatch' if len(cols) % 2 == 0 else 'plain')
+    else:
+        cols = ['start'] + list(name[:NAME_COLS])
     cols += ['end', 'void']
     top = bytes(codes[c] for c in cols)
     return top + bytes(c + 1 for c in top)
 
 
-def short_title(title):
-    """The banner fits 14 characters: prefer whole words."""
-    words = textwrap.wrap(title, 14)
-    return words[0] if words else ''
+def name_field(name, codes):
+    """Length and tall-font top tiles of the whole name, for the engine's scrolling."""
+    name = banner_name(name)
+    return bytes((len(name),)) + bytes(codes[c] for c in name)
 
 
 def record(game, covers, codes):
     tiles, pal = cover(game, covers)
     if not game.playable:
-        pal = shade(pal, 11, 4)
-    return tiles + pal + banner_rows(short_title(game.title), codes) + bytes((int(game.playable),))
+        pal = pal[:2] + shade(pal, 11, 4)[2:]     # greyed picture, same concrete border
+    return (tiles + pal + banner_rows(game.title, codes) + bytes((int(game.playable),))
+            + name_field(game.title, codes))
 
 
 def blank_record(codes):
     """Empty card slot: concrete in the wall palette, so it disappears into the wall."""
     noise = [_noise_tile(i) for i in range(12)]
     pixels = [[noise[(x//8 + y//8*3) % 12][y % 8][x % 8] for x in range(ART_W)] for y in range(ART_H)]
-    return tile_bytes(pixels) + palettes(WALL) + banner_rows('', codes) + bytes((0,))
+    return tile_bytes(pixels) + palettes(WALL) + banner_rows('', codes) + bytes((0, 0))
 
 
 def wall_maps(heading, pages, codes):
