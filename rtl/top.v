@@ -174,11 +174,13 @@ module top (
                        else if (u_d == "Q") us <= S_BAUD;
                        else if (u_d == "M") begin tq <= 2; tq_s <= 6; end
                        else if (u_d == "S") begin tq <= 4; tq_s <= 1; probation <= 0; end
+`ifndef RELEASE
                        else if (u_d == "D") begin tq <= 9; tq_s <= 2; end
                        else if (u_d == "H") begin tq <= 3; tq_s <= 3; end
                        else if (u_d == "F") begin
                            tq <= 4; tq_s <= 4; scanout_reply <= {scanout_frame, scanout_sig};
                        end
+`endif
                 S_JOY: begin ubtn <= u_d; us <= S_CMD; end
                 S_BAUD: begin
                     us <= S_CMD;
@@ -202,6 +204,9 @@ module top (
         7'b001_0100: tx_d = "S";
         7'b001_0011: tx_d = {p_ready, ld_done, fl_busy, lcd_on, locked_v, waitlock, cart_type};
         7'b001_0010: tx_d = ld_m_addr[21:14];
+`ifndef RELEASE
+        // Debug replies (make release drops them; synthesis then trims the logic they read:
+        // self-test failure capture, controller state and latency, header bytes, video signature).
         7'b010_1001: tx_d = "D";
         7'b010_1000: tx_d = {test_done, test_pass, test_we, b_busy, p_ready, b_hang, test_req, logo_ok};
         7'b010_0111: tx_d = b_state;
@@ -218,6 +223,7 @@ module top (
         7'b100_0011: tx_d = scanout_reply[23:16];
         7'b100_0010: tx_d = scanout_reply[15:8];
         7'b100_0001: tx_d = scanout_reply[7:0];
+`endif
         7'b101_0100: tx_d = "G";
         7'b101_0011: tx_d = menu_index[7:0];
         7'b101_0010: tx_d = menu_index[15:8];
