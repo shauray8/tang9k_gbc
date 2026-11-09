@@ -48,6 +48,7 @@ class Link:
         L.libusb_control_transfer.argtypes = [V, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint16,
                                               ctypes.c_uint16, V, ctypes.c_uint16, ctypes.c_uint]
         L.libusb_bulk_transfer.argtypes = [V, ctypes.c_ubyte, V, I, ctypes.POINTER(I), ctypes.c_uint]
+        L.libusb_clear_halt.argtypes = [V, ctypes.c_ubyte]
         L.libusb_error_name.restype = ctypes.c_char_p
         self.ctx = V()
         L.libusb_init(ctypes.byref(self.ctx))
@@ -136,10 +137,19 @@ class Link:
         n = ctypes.c_int()
         for i in range(0, len(data), 4096):
             chunk = data[i:i + 4096]
-            r = self.L.libusb_bulk_transfer(self.h, EP_OUT, ctypes.create_string_buffer(chunk, len(chunk)),
-                                            len(chunk), ctypes.byref(n), 5000)
-            if r:
-                sys.exit(f"USB write failed: {self.L.libusb_error_name(r).decode()}")
+            for attempt in range(3):
+                r = self.L.libusb_bulk_transfer(self.h, EP_OUT, ctypes.create_string_buffer(chunk, len(chunk)),
+                                                len(chunk), ctypes.byref(n), 5000)
+                if r == 0:
+                    break
+                # The BL702 bridge occasionally stalls its endpoint (PIPE): clear it and resend
+                # the part it did not accept, instead of leaving the bridge wedged.
+                self.L.libusb_clear_halt(self.h, EP_OUT)
+                self.L.libusb_clear_halt(self.h, EP_IN)
+                chunk = chunk[n.value:]
+                time.sleep(0.05)
+            else:
+                sys.exit(f"USB write failed: {self.L.libusb_error_name(r).decode()} (re-plug the board)")
 
     def read(self, seconds, done=None):
         """Collect UART bytes for `seconds`, or until done(bytes_so_far) is true. Replies may span
@@ -147,7 +157,10 @@ class Link:
         out, n, buf = b"", ctypes.c_int(), ctypes.create_string_buffer(512)
         end = time.time() + seconds
         while time.time() < end and not (done and done(out)):
-            self.L.libusb_bulk_transfer(self.h, EP_IN, buf, 512, ctypes.byref(n), 50)
+            r = self.L.libusb_bulk_transfer(self.h, EP_IN, buf, 512, ctypes.byref(n), 50)
+            if r == -9:                                   # LIBUSB_ERROR_PIPE: stalled endpoint
+                self.L.libusb_clear_halt(self.h, EP_IN)
+                continue
             d = buf.raw[:n.value]
             for i in range(0, len(d), 64):
                 out += d[i + 2:i + 64]
