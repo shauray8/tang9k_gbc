@@ -1,4 +1,5 @@
-// DIV/TIMA/TMA/TAC timer. Advances once per M-cycle (ce).
+// DIV/TIMA/TMA/TAC timer. Advances once per M-cycle (ce). A CPU read in an M-cycle sees
+// the state after that cycle's tick (Mooneye timer tests), so reads come from the next state.
 module gb_timer (
     input            clk,
     input            rst,
@@ -25,35 +26,46 @@ module gb_timer (
         endcase
     endfunction
 
+    reg [15:0] ndiv;
+    reg [2:0] ntac;
+    reg [8:0] t9;
+    reg nirq, novf;
+    // next state if this M-cycle completes (writes included; reads have no write)
+    always @(*) begin
+        ndiv = div_reset ? 16'd0 : div + 16'd4;
+        ntac = tac;
+        if (sel && wr && addr_lo[1:0] == 2'd0) ndiv = 0;
+        if (sel && wr && addr_lo[1:0] == 2'd3) ntac = din[2:0];
+        t9 = {1'b0, tima};
+        nirq = 0;
+        if (ovf) begin t9 = {1'b0, tma}; nirq = 1; end
+        novf = 0;
+        // A TIMA write wins over a same-cycle increment, is ignored in the reload cycle
+        // (TMA wins there) and cancels a pending reload when it lands on the overflow.
+        if (sel && wr && addr_lo[1:0] == 2'd1 && !ovf) t9 = {1'b0, din};
+        if (sel && wr && addr_lo[1:0] == 2'd2 && ovf) t9 = {1'b0, din};
+        // falling edge of the selected bit increments TIMA
+        if (tbit(div, tac) && !tbit(ndiv, ntac) && !(sel && wr && addr_lo[1:0] == 2'd1 && !ovf)) begin
+            t9 = t9 + 1;
+            if (t9[8]) novf = 1;
+        end
+    end
+
     always @(*) case (addr_lo[1:0])
-        2'd0: dout = div[15:8];
-        2'd1: dout = tima;
+        2'd0: dout = ndiv[15:8];
+        2'd1: dout = t9[7:0];
         2'd2: dout = tma;
         default: dout = {5'b11111, tac};
     endcase
 
-    reg [15:0] ndiv;
-    reg [2:0] ntac;
-    reg [8:0] t9;
     always @(posedge clk) begin
         irq <= 0;
         if (rst) begin
             div <= 16'hABCC; tima <= 0; tma <= 0; tac <= 0; ovf <= 0;
         end else if (ce || div_reset) begin
-            ndiv = div_reset ? 16'd0 : div + 16'd4;
-            ntac = tac;
-            if (ce && sel && wr && addr_lo[1:0] == 2'd0) ndiv = 0;
-            if (ce && sel && wr && addr_lo[1:0] == 2'd3) ntac = din[2:0];
-            t9 = {1'b0, tima};
-            if (ovf) begin t9 = {1'b0, tma}; irq <= 1; end
-            ovf <= 0;
-            if (ce && sel && wr && addr_lo[1:0] == 2'd1) t9 = {1'b0, din};
-            if (ce && sel && wr && addr_lo[1:0] == 2'd2) begin tma <= din; if (ovf) t9 = {1'b0, din}; end
-            // falling edge of the selected bit increments TIMA
-            if (tbit(div, tac) && !tbit(ndiv, ntac)) begin
-                t9 = t9 + 1;
-                if (t9[8]) ovf <= 1;
-            end
+            if (ce && sel && wr && addr_lo[1:0] == 2'd2) tma <= din;
+            irq <= nirq;
+            ovf <= novf;
             tima <= t9[7:0];
             div <= ndiv;
             tac <= ntac;
