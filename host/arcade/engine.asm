@@ -26,28 +26,34 @@ DEF rDMA   EQU $FF46
 DEF rIE    EQU $FFFF
 
 ; ---- fixed layout shared with menu.py ----
-DEF FONT_TILES   EQU $2000   ; 96 heading font, 96 banner font, 32 wall tiles -> tiles 0-223
-DEF SPRITE_TILES EQU $2E00   ; 8 frame tiles -> tile 224
-DEF BG_MAP       EQU $2E80   ; 32x18 tile map
-DEF BG_ATTR      EQU $30C0   ; 32x18 attributes
-DEF BG_PALS      EQU $3300   ; 8 palettes x 8 bytes (0 wall + banner, 1-7 cards)
-DEF OBJ_PALS     EQU $3340
-DEF IDLE_TEXT    EQU $3380   ; 2 x 20 banner rows when the library is empty
-DEF LOAD_TEXT    EQU $33C0   ; banner second row while loading
-DEF BLANK_RECORD EQU $3400   ; record shown for empty card slots
+DEF FONT_TILES   EQU $2000   ; bank 0 tiles 0-255: heading font, wall, frame sprites
+DEF BANK1_TILES  EQU $3000   ; bank 1 tiles 140-255: tall banner font and banner pieces
+DEF BG_MAP       EQU $3740   ; 32x18 tile map
+DEF BG_ATTR      EQU $3980   ; 32x18 attributes
+DEF BG_PALS      EQU $3BC0   ; 8 palettes x 8 bytes, see PAL_*
+DEF OBJ_PALS     EQU $3C00
+DEF IDLE_TEXT    EQU $3C10   ; 2 x 20 banner rows when the library is empty
+DEF LOAD_TEXT    EQU $3C40   ; 2 x 20 banner rows while loading
+DEF BLANK_RECORD EQU $3C80   ; record shown for empty card slots
 DEF GAME_COUNT   EQU $3FF0   ; 16-bit
 DEF LAST_PAGE    EQU $3FF2   ; 16-bit index of the last page's first game
 
 DEF PAGE       EQU 7         ; cards per page: 0-2 top row, 3-6 bottom row
 DEF CARD_TILES EQU 20        ; 32x40 art, VRAM bank 1, tiles 20 * card
 
+; BG palettes. Unselected cards share one grey palette (card colours are sorted darkest
+; first), so only the selected card needs its own; selection moves by rewriting attributes.
+DEF PAL_WALL   EQU 0         ; also empty slots (their art is wall texture)
+DEF PAL_DIM    EQU 1
+DEF PAL_SEL    EQU 2
+DEF PAL_HIDDEN EQU 5         ; cards not loaded yet: flat wall colour
+
 ; record layout (512 bytes, banks 1+, 32 per bank)
 DEF R_PAL    EQU CARD_TILES * 16
-DEF R_DIM    EQU R_PAL + 8
-DEF R_BANNER EQU R_PAL + 16  ; 2 x 20, banner-font tile numbers
-DEF R_PLAY   EQU R_PAL + 56
+DEF R_BANNER EQU R_PAL + 8   ; 2 x 20 bank-1 tile numbers (tall font, banner pieces)
+DEF R_PLAY   EQU R_BANNER + 40
 
-DEF FRAME_TILE EQU 224       ; 8x16 sprites: top, bottom, left, right edge
+DEF FRAME_TILE EQU 252       ; 8x16 sprites: horizontal edge pair, vertical edge pair
 
 ; ---- WRAM ----
 SECTION "shadow oam", WRAM0[$C000]
@@ -59,6 +65,7 @@ wOnPage:  ds 1     ; cards on this page
 wLoad:    ds 1     ; next card to load (one per frame), PAGE = all loaded
 wPalDirty: ds 1    ; bit n: card n's palette needs rewriting (VBlank only fits a few)
 wPalWork: ds 1
+wBudget:  ds 1     ; card updates left in this VBlank
 wBannerDirty: ds 1
 wFrame:   ds 1
 wPad:     ds 1
@@ -95,12 +102,16 @@ Start:
     call Gdma
     ld hl, FONT_TILES + 128 * 16
     ld de, $8800
-    ld c, 96
+    ld c, 128
     call Gdma
-    ld hl, SPRITE_TILES
-    ld de, $8000 + FRAME_TILE * 16
-    ld c, 8
+    ld a, 1
+    ldh [rVBK], a
+    ld hl, BANK1_TILES
+    ld de, $8000 + PAGE * CARD_TILES * 16
+    ld c, 116
     call Gdma
+    xor a
+    ldh [rVBK], a
     ld hl, BG_MAP
     ld de, $9800
     ld c, 36
@@ -167,7 +178,11 @@ Start:
     cp PAGE
     jr nz, .first
     ld [wLoad], a
-    call SetPalettes
+.cards:                        ; LCD is off: no budget, finish every card now
+    call UpdateCards
+    ld a, [wPalDirty]
+    or a
+    jr nz, .cards
     call DrawBanner
     call UpdateSprites
     call $FF80
@@ -177,6 +192,15 @@ Start:
 MainLoop:
     call WaitVBlank
     call $FF80                 ; OAM DMA from wOAM
+    ; VRAM and palettes are locked while a line is drawn, so the VBlank work is budgeted:
+    ; banner (40 writes), one card load (GDMA), then at most two card recolours.
+    ld a, [wBannerDirty]
+    or a
+    jr z, .nobanner
+    xor a
+    ld [wBannerDirty], a
+    call DrawBanner
+.nobanner:
     ld a, [wLoad]
     cp PAGE
     jr nc, .loaded
@@ -185,17 +209,9 @@ MainLoop:
     ld [wLoad], a
     call LoadCard              ; one card per VBlank: the page fills in card by card
 .loaded:
-    ld a, [wPalDirty]          ; palettes are not writable in mode 3
+    ld a, [wPalDirty]
     or a
-    call nz, SetPalettes
-.nopal:
-    ld a, [wBannerDirty]
-    or a
-    jr z, .nobanner
-    xor a
-    ld [wBannerDirty], a
-    call DrawBanner
-.nobanner:
+    call nz, UpdateCards
     ld hl, wFrame
     inc [hl]
     call ReadPad
@@ -330,8 +346,8 @@ LoadCard:
     ldh [rVBK], a
     ret
 
-; a = card: mark its palette for rewriting (keeps bc, de, hl)
-MarkPal:
+; a = card -> a = its bit in wPalDirty (keeps bc, de, hl)
+CardBit:
     push bc
     ld b, a
     inc b
@@ -340,6 +356,13 @@ MarkPal:
     rlca
     dec b
     jr nz, .shift
+    pop bc
+    ret
+
+; a = card: mark it for UpdateCards (keeps bc, de, hl)
+MarkPal:
+    call CardBit
+    push bc
     ld b, a
     ld a, [wPalDirty]
     or b
@@ -347,40 +370,41 @@ MarkPal:
     pop bc
     ret
 
-; BG palettes 1-7 of the marked cards: selected card in colour (blinking while launching),
-; others dimmed, cards not loaded yet in the wall colour so stale art never shows
-SetPalettes:
+; Marked cards get their attributes: selected -> PAL_SEL (and its colours, blinking dim
+; while launching), others PAL_DIM, empty slots PAL_WALL, not loaded yet PAL_HIDDEN.
+UpdateCards:
+    ld a, 2
+    ld [wBudget], a
     ld a, [wPalDirty]
     ld [wPalWork], a
-    xor a
-    ld [wPalDirty], a
     ld c, 0
 .card:
     ld a, [wPalWork]
     rrca
     ld [wPalWork], a
     jr nc, .next
-    ld a, c
-    inc a
-    add a
-    add a
-    add a
-    or $80
-    ldh [rBCPS], a
     ld a, [wLoad]
     ld b, a
     ld a, c
     cp b
-    jr nc, .hidden
-    ld l, c
-    push bc
-    call SlotIndex
-    call Record
-    pop bc
-    ld de, R_DIM
+    ld b, PAL_HIDDEN
+    jr nc, .attr
+    ld a, [wOnPage]
+    ld b, a
+    ld a, c
+    cp b
+    ld b, PAL_WALL
+    jr nc, .attr
     ld a, [wSel]
     cp c
-    jr nz, .use
+    ld b, PAL_DIM
+    jr nz, .attr
+    push bc
+    ld l, c
+    call SlotIndex
+    call Record
+    ld de, R_PAL
+    add hl, de
     ld a, [wLaunch]
     or a
     jr z, .colour
@@ -388,27 +412,31 @@ SetPalettes:
     jr z, .colour               ; $FF: sent
     ld a, [wFrame]
     bit 2, a
-    jr nz, .use
+    jr z, .colour
+    ld hl, BG_PALS + PAL_DIM * 8
 .colour:
-    ld de, R_PAL
-.use:
-    add hl, de
+    ld a, $80 | PAL_SEL * 8
+    ldh [rBCPS], a
     ld b, 8
 .w:
     ld a, [hl+]
     ldh [rBCPD], a
     dec b
     jr nz, .w
-    jr .next
-.hidden:
-    ld b, 4
-.h:
-    ld a, [BG_PALS]
-    ldh [rBCPD], a
-    ld a, [BG_PALS + 1]
-    ldh [rBCPD], a
-    dec b
-    jr nz, .h
+    pop bc
+    ld b, PAL_SEL
+.attr:
+    call CardAttr
+    ld a, c                     ; done: clear its mark
+    call CardBit
+    cpl
+    ld b, a
+    ld a, [wPalDirty]
+    and b
+    ld [wPalDirty], a
+    ld hl, wBudget
+    dec [hl]
+    ret z
 .next:
     inc c
     ld a, c
@@ -416,8 +444,55 @@ SetPalettes:
     jr nz, .card
     ret
 
-; ---------------- banner (map rows 16-17) ----------------
+; c = card, b = palette: attribute (VRAM bank 1 tiles) for its 4x5 tiles (keeps c)
+CardAttr:
+    push bc
+    ld a, c
+    add a
+    ld e, a
+    ld d, 0
+    ld hl, CardPos
+    add hl, de
+    ld a, [hl+]                 ; px
+    rrca
+    rrca
+    rrca
+    ld e, a                     ; column
+    ld l, [hl]                  ; py: row * 32 = py * 4
+    ld h, 0
+    add hl, hl
+    add hl, hl
+    ld d, 0
+    add hl, de
+    ld de, $9800
+    add hl, de
+    ld a, b
+    or $08
+    ld b, a
+    ld a, 1
+    ldh [rVBK], a
+    ld c, 5
+.row:
+    ld a, b
+    ld [hl+], a
+    ld [hl+], a
+    ld [hl+], a
+    ld [hl+], a
+    ld de, 28
+    add hl, de
+    dec c
+    jr nz, .row
+    xor a
+    ldh [rVBK], a
+    pop bc
+    ret
+
+; ---------------- banner (map rows 16-17, tall font) ----------------
 DrawBanner:
+    ld hl, LOAD_TEXT
+    ld a, [wLaunch]
+    or a
+    jr nz, .copy
     ld hl, IDLE_TEXT
     ld a, [wOnPage]
     or a
@@ -431,11 +506,6 @@ DrawBanner:
 .copy:
     ld de, $9800 + 16 * 32
     call Copy20
-    ld a, [wLaunch]
-    or a
-    jr z, .second
-    ld hl, LOAD_TEXT
-.second:
     ld de, $9800 + 17 * 32
 Copy20:
     ld b, 20
@@ -692,7 +762,7 @@ Send:
     jr nz, .wait
     ret
 
-; ---------------- selection frame: 18 sprites, at most 6 on any line ----------------
+; ---------------- selection frame: 14 sprites, a 2 px white edge inside the card ----------
 UpdateSprites:
     ld hl, wOAM
     ld a, [wOnPage]
@@ -710,26 +780,24 @@ UpdateSprites:
     ld a, [hl]
     ld [wFy], a
     pop hl
-    ld a, [wFy]                 ; top edge: two lines just above the card
+    ld a, [wFy]                 ; top two lines
+    add 16
     ld d, a
-    ld a, FRAME_TILE
     call HEdge
-    ld a, [wFy]                 ; bottom edge: two lines just below
-    add 56
+    ld a, [wFy]                 ; bottom two lines (38-39)
+    add 16 + 38
     ld d, a
-    ld a, FRAME_TILE + 2
     call HEdge
-    ld a, [wFx]
+    ld a, [wFx]                 ; left two columns
+    add 8
     ld e, a
-    ld a, FRAME_TILE + 4
     call VEdge
-    ld a, [wFx]
-    add 40
+    ld a, [wFx]                 ; right two columns (30-31)
+    add 8 + 30
     ld e, a
-    ld a, FRAME_TILE + 6
     jr VEdge
 .hide:
-    ld b, 16 * 4
+    ld b, 14 * 4
     xor a
 .z:
     ld [hl+], a
@@ -737,44 +805,38 @@ UpdateSprites:
     jr nz, .z
     ret
 
-; d = OAM y, a = tile: five sprites covering x-2 .. x+33
+; d = OAM y: four sprites across the card's 32 columns
 HEdge:
-    ld c, a
     ld a, [wFx]
-    add 6
+    add 8
     ld e, a
     ld b, 4
 .l:
-    ld a, c
+    ld a, FRAME_TILE
     call Put
     ld a, e
     add 8
     ld e, a
     dec b
     jr nz, .l
-    ld a, [wFx]
-    add 34
-    ld e, a
-    ld a, c
-    jr Put
+    ret
 
-; e = OAM x, a = tile: three 8x16 sprites down the card's 40 lines (the last overlaps)
+; e = OAM x: three 8x16 sprites down the card's 40 lines (the last overlaps)
 VEdge:
-    ld c, a
     ld a, [wFy]
     add 16
     ld d, a
-    ld a, c
+    ld a, FRAME_TILE + 2
     call Put
     ld a, [wFy]
     add 32
     ld d, a
-    ld a, c
+    ld a, FRAME_TILE + 2
     call Put
     ld a, [wFy]
     add 40
     ld d, a
-    ld a, c
+    ld a, FRAME_TILE + 2
     jr Put
 
 ; OAM entry at hl: y = d, x = e, tile = a, attributes 0
@@ -790,8 +852,8 @@ Put:
 
 ; card positions (screen pixels, top-left), shared with menu.py's CARDS
 CardPos:
-    db 24, 16, 64, 24, 104, 16
-    db 8, 72, 40, 64, 80, 80, 120, 72
+    db 48, 16, 80, 24, 112, 16
+    db 16, 80, 48, 72, 80, 80, 112, 72
 ; up from bottom card 3-6, down from top card 0-2 (nearest column)
 UpTab:
     db 0, 0, 1, 2

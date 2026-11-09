@@ -249,6 +249,14 @@ def pinned(pixels):
     return out
 
 
+def _by_luma(palette, pixels):
+    """Order the four colours darkest first, so every card dims with the one shared grey palette."""
+    luma = [_luma(tuple(int(c[i:i+2], 16) for i in (1, 3, 5))) for c in palette]
+    order = sorted(range(4), key=luma.__getitem__)
+    remap = {old: new for new, old in enumerate(order)}
+    return [palette[i] for i in order], [[remap[c] for c in row] for row in pixels]
+
+
 def cover(game, folder=None):
     """(320 bytes of 32x40 tiles, 8-byte RGB555 palette) for one game card."""
     path = art_source(game, folder)
@@ -263,6 +271,7 @@ def cover(game, folder=None):
         pixels = [[int(c) for c in row] for row in rows]
     else:
         palette, pixels = image_art(path)
+    palette, pixels = _by_luma(palette, pixels)
     return tile_bytes(pinned(pixels)), palettes(palette)
 
 
@@ -271,24 +280,22 @@ def text(value, width=20):
                  for c in value.upper()[:width].ljust(width))
 
 
-def banner_text_tiles(value, width=20):
-    """Banner rows use their own copy of the font (dark on red, same palette as the wall)."""
-    return bytes(BANNER_FONT + c for c in text(value, width))
-
-
-# ---------------- card wall (host/arcade/engine.asm) ----------------
+# ---------------- card wall (host/arcade/engine.asm), after GTA 2's character select ----------
 ENGINE = ROOT / 'host/arcade/engine.bin'
-FONT_TILES, SPRITE_TILES, BG_MAP, BG_ATTR = 0x2000, 0x2E00, 0x2E80, 0x30C0
-BG_PALS, OBJ_PALS, IDLE_TEXT, LOAD_TEXT = 0x3300, 0x3340, 0x3380, 0x33C0
-BLANK_RECORD, GAME_COUNT, LAST_PAGE = 0x3400, 0x3FF0, 0x3FF2
+FONT_TILES, BANK1_TILES, BG_MAP, BG_ATTR = 0x2000, 0x3000, 0x3740, 0x3980
+BG_PALS, OBJ_PALS, IDLE_TEXT, LOAD_TEXT = 0x3BC0, 0x3C00, 0x3C10, 0x3C40
+BLANK_RECORD, GAME_COUNT, LAST_PAGE = 0x3C80, 0x3FF0, 0x3FF2
 RECORD, PER_BANK, PAGE, CARD_TILES = 512, 32, 7, 20
-BANNER_FONT, WORLD = 96, 192                    # tile numbers: heading font 0, banner font, wall
-# engine's CardPos: three up, four down, at uneven heights; later cards overlap earlier shadows
-CARDS = [(24, 16), (64, 24), (104, 16), (8, 72), (40, 64), (80, 80), (120, 72)]
+WALL_FIRST, WALL_LAST, FRAME_TILE = 96, 251, 252   # bank 0 tile numbers
+BANK1_FIRST = PAGE * CARD_TILES                    # bank 1 tiles after the card art: 140-255
+# engine's CardPos: GTA 2's six spots (two up, four down) plus a third top card
+CARDS = [(48, 16), (80, 24), (112, 16), (16, 80), (48, 72), (80, 80), (112, 72)]
 
-# One palette for wall, heading and banner, so all seven cards get their own palette.
-WALL = ['#4A4844', '#F8D830', '#1E1C1A', '#C8381E']    # concrete, yellow, dark, banner red
-FRAME = ['#000000', '#F8F8F8', '#B8B8B8', '#202020']   # colour 0 transparent
+WALL = ['#313131', '#212121', '#424242', '#000000']    # concrete, dark, light, black stains
+DIM = ['#000000', '#212121', '#424242', '#636363']     # every unselected card (darkest first)
+TITLE = ['#313131', '#F7E731', '#636363', '#000000']   # yellow heading on concrete
+BANNER = ['#D64221', '#630010', '#F7F700', '#000000']  # red, dark red, yellow line, text
+FRAME = ['#000000', '#F7F7F7', '#B5B5B5', '#212121']   # colour 0 transparent
 
 
 def palettes(*sets):
@@ -305,105 +312,167 @@ def shade(palette, scale, offset):
     return bytes(out)
 
 
-def _noise(seed):
+def _noise_tile(seed):
     rnd = random.Random(seed)
-    tile = [[0]*8 for _ in range(8)]
-    for y in range(8):
-        for x in range(8):
-            tile[y][x] = 2 if rnd.random() < 0.10 else 0
-    if seed % 3 == 2:                                    # a short crack
-        x = rnd.randrange(8)
-        for y in range(8):
-            tile[y][x] = 2
-            x = max(0, min(7, x + rnd.choice((-1, 0, 1))))
-    return tile
+    return [[1 if r < 0.16 else 2 if r < 0.30 else 0 for r in (rnd.random() for _ in range(8))]
+            for _ in range(8)]
 
 
-def wall_tiles():
-    """Concrete noise, card drop shadows (2 px, offset 2 px) and the banner stripe."""
-    tiles = {f'noise{i}': _noise(i) for i in range(8)}
-    def shadow(cols, rows):
-        t = [row[:] for row in tiles['noise0']]
-        for y in rows:
-            for x in cols:
-                t[y][x] = 2
-        return t
-    tiles['sh_r_top'] = shadow((0, 1), range(2, 8))
-    tiles['sh_r'] = shadow((0, 1), range(8))
-    tiles['sh_b_left'] = shadow(range(2, 8), (0, 1))
-    tiles['sh_b'] = shadow(range(8), (0, 1))
-    tiles['sh_c'] = shadow((0, 1), (0, 1))
-    tiles['band'] = [[1]*8] + [[2 if (x+y) % 8 in (0, 1) else 3 for x in range(8)]
-                               for y in range(1, 8)]
-    return tiles
+def wall_image():
+    """160x128 concrete: speckle noise, faint block joints, black stains and a crack."""
+    noise = [_noise_tile(i) for i in range(12)]
+    rnd = random.Random(3)
+    pick = [[rnd.randrange(12) for _ in range(20)] for _ in range(16)]
+    img = [[noise[pick[y//8][x//8]][y % 8][x % 8] for x in range(160)] for y in range(128)]
+    for y, x0, x1 in ((39, 0, 160), (87, 0, 160)):            # block joints: dark line, light below
+        for x in range(x0, x1):
+            img[y][x], img[y+1][x] = 1, 2
+    for x, y0, y1 in ((27, 0, 39), (123, 0, 39), (70, 40, 87), (150, 40, 87), (40, 88, 128)):
+        for y in range(y0, y1):
+            img[y][x] = 1
+    for cx, cy, r in ((130, 66, 4), (19, 50, 2), (155, 58, 2), (6, 104, 3)):   # stains
+        for y in range(cy-r-2, cy+r+3):
+            for x in range(cx-r-2, cx+r+3):
+                d = (x-cx)**2 + (y-cy)**2
+                if 0 <= x < 160 and 0 <= y < 128:
+                    if d <= r*r:
+                        img[y][x] = 3
+                    elif d <= (r+1)**2 and rnd.random() < 0.5:
+                        img[y][x] = 1
+    x = 152                                                    # crack down the right side
+    for y in range(96, 126):
+        img[y][x] = 3
+        x = max(144, min(158, x + rnd.choice((-1, 0, 0, 1))))
+    return img
 
 
 def frame_tiles():
-    """8x16 sprite pairs: top edge, bottom edge, left edge, right edge of the 2 px frame."""
+    """8x16 sprite pairs: two lines across (top/bottom edge), two columns down (sides)."""
     def t(rows):
         return tile_bytes([[int(c) for c in row] for row in rows])
-    empty = ['00000000']*8
-    return (t(empty) + t(['00000000']*6 + ['11111111']*2)
-            + t(['11111111']*2 + ['00000000']*6) + t(empty)
-            + t(['00000011']*8)*2 + t(['11000000']*8)*2)
+    return t(['11111111']*2 + ['00000000']*6) + t(['00000000']*8) + t(['11000000']*8)*2
 
 
-def banner_text(game):
-    """Two banner rows: the title, then its second line or the size/type (or why it can't run)."""
-    lines = textwrap.wrap(game.title.upper(), 19) or ['']
-    second = lines[1] if game.playable and len(lines) > 1 else game.info
-    return banner_text_tiles(' ' + lines[0]) + banner_text_tiles(' ' + second)
+# Banner, rows 16-17: yellow top line, angled start, tall name, a divider, hatching, angled end.
+BANNER_PIECES = ('start', 'plain', 'div', 'hatch', 'end', 'void')
+TALL = ' ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?\'-&:/()+'
 
 
-def record(game, covers):
+def _banner_piece(kind):
+    """16x8 pixel column (top, bottom tile) in BANNER colours."""
+    px = [[0]*8 for _ in range(16)]
+    for x in range(8):
+        px[0][x] = 2
+    def slash(x0, width):
+        for y in range(1, 16):
+            for w in range(width):
+                x = x0 + (15 - y) // 2 + w
+                if 0 <= x < 8:
+                    px[y][x] = 1
+    if kind == 'start':
+        slash(-4, 3)
+    elif kind == 'div':
+        slash(-4, 3)
+    elif kind == 'hatch':
+        slash(-3, 1)
+    elif kind == 'end':
+        for y in range(16):
+            for x in range(8):
+                if x > 7 - (15 - y) // 2 - 1:
+                    px[y][x] = 3
+        slash(-5, 2)
+    elif kind == 'void':
+        px = [[3]*8 for _ in range(16)]
+    return px
+
+
+def bank1_tiles():
+    """Tile data and numbers: tall banner font (2 tiles per character) then banner pieces."""
+    data, codes = bytearray(), {}
+    def add(px):
+        n = BANK1_FIRST + len(data) // 16
+        data.extend(tile_bytes(px[:8]) + tile_bytes(px[8:]))
+        return n
+    for ch in TALL:
+        rows = bytes.fromhex(FONT.get(ch, FONT['?'])) if ch != ' ' else bytes(7)
+        px = [[0]*8 for _ in range(16)]
+        for y, row in enumerate(rows):
+            for x in range(5):
+                if row & (16 >> x):
+                    px[1+2*y][1+x] = px[2+2*y][1+x] = 3
+        for x in range(8):
+            px[0][x] = 2
+        codes[ch] = add(px)
+    for kind in BANNER_PIECES:
+        codes[kind] = add(_banner_piece(kind))
+    if len(data) > (256 - BANK1_FIRST) * 16:
+        raise ValueError('banner tiles overflow VRAM bank 1')
+    return bytes(data), codes
+
+
+def banner_rows(name, codes):
+    """Two 20-byte map rows: start, name (up to 14 characters), divider, hatching, end."""
+    name = ''.join(c if c in TALL else ' ' for c in name.upper())[:14].rstrip()
+    cols = ['start'] + list(name) + ['div']
+    while len(cols) < 18:
+        cols.append('hatch' if len(cols) % 2 == 0 else 'plain')
+    cols += ['end', 'void']
+    top = bytes(codes[c] for c in cols)
+    return top + bytes(c + 1 for c in top)
+
+
+def short_title(title):
+    """The banner fits 14 characters: prefer whole words."""
+    words = textwrap.wrap(title, 14)
+    return words[0] if words else ''
+
+
+def record(game, covers, codes):
     tiles, pal = cover(game, covers)
-    dim = shade(pal, 8, 3)
     if not game.playable:
         pal = shade(pal, 11, 4)
-    return tiles + pal + dim + banner_text(game) + bytes((int(game.playable),))
+    return tiles + pal + banner_rows(short_title(game.title), codes) + bytes((int(game.playable),))
 
 
-def blank_record():
-    """Empty card slot: concrete in the wall's colours, so it disappears into the wall."""
-    noise = [_noise(i) for i in range(8) if i % 3 != 2]          # no cracks through empty slots
-    pixels = [[noise[(x//8 + y//8*3) % len(noise)][y % 8][x % 8] for x in range(ART_W)]
-              for y in range(ART_H)]
-    wall = palettes([WALL[0], WALL[0], WALL[2], WALL[2]])
-    return tile_bytes(pixels) + wall + wall + banner_text_tiles('')*2 + bytes((0,))
+def blank_record(codes):
+    """Empty card slot: concrete in the wall palette, so it disappears into the wall."""
+    noise = [_noise_tile(i) for i in range(12)]
+    pixels = [[noise[(x//8 + y//8*3) % 12][y % 8][x % 8] for x in range(ART_W)] for y in range(ART_H)]
+    return tile_bytes(pixels) + palettes(WALL) + banner_rows('', codes) + bytes((0,))
 
 
-def wall_maps(heading, pages, tile):
+def wall_maps(heading, pages, codes):
+    """Map and attributes, plus the deduplicated wall tiles they use."""
+    img = wall_image()
+    tiles, index = [], {}
     bg, attr = bytearray(32*18), bytearray(32*18)
-    rnd = random.Random(1)
-    def put(row, col, value, pal=0):
-        if row < 15 and col < 32:
-            bg[row*32+col], attr[row*32+col] = value, pal
-    for row in range(15):
-        for col in range(32):
-            put(row, col, tile[f'noise{rnd.randrange(8) if rnd.random() < 0.6 else 0}'])
-    bg[0:20] = text(heading.center(20))
-    for x, y in CARDS:                                   # all shadows first, then all cards
-        c0, r0 = x // 8, y // 8
-        put(r0, c0+4, tile['sh_r_top'])
-        for r in range(1, 5):
-            put(r0+r, c0+4, tile['sh_r'])
-        put(r0+5, c0, tile['sh_b_left'])
-        for c in range(1, 4):
-            put(r0+5, c0+c, tile['sh_b'])
-        put(r0+5, c0+4, tile['sh_c'])
+    for row in range(16):
+        for col in range(20):
+            key = tuple(tuple(img[row*8+y][col*8:col*8+8]) for y in range(8))
+            if key not in index:
+                index[key] = WALL_FIRST + len(tiles)
+                tiles.append([list(r) for r in key])
+            bg[row*32+col] = index[key]
+    if WALL_FIRST + len(tiles) > WALL_LAST + 1:
+        raise ValueError(f'wall texture needs {len(tiles)} tiles')
+    heading = heading.center(20)
+    for col, ch in enumerate(text(heading)):
+        if heading[col] != ' ':
+            bg[32+col], attr[32+col] = ch, 3
     for k, (x, y) in enumerate(CARDS):
-        c0, r0 = x // 8, y // 8
         for r in range(5):
             for c in range(4):
-                put(r0+r, c0+c, k*CARD_TILES + r*4 + c, 0x08 | (1+k))   # VRAM bank 1
+                i = (y//8 + r)*32 + x//8 + c
+                bg[i], attr[i] = k*CARD_TILES + r*4 + c, 0x08 | 5     # bank 1, hidden until loaded
     if pages > 1:
-        put(7, 0, text('<', 1)[0])
-        put(7, 19, text('>', 1)[0])
-    blank = banner_text_tiles(' ', 1)[0]
+        bg[8*32], attr[8*32] = text('<', 1)[0], 3
+        bg[8*32+19], attr[8*32+19] = text('>', 1)[0], 3
+    rows = banner_rows('', codes)
     for col in range(32):
-        bg[15*32+col] = tile['band']
-        bg[16*32+col] = bg[17*32+col] = blank
-    return bg, attr
+        bg[16*32+col] = rows[min(col, 19)]
+        bg[17*32+col] = rows[20+min(col, 19)]
+        attr[16*32+col] = attr[17*32+col] = 0x08 | 4
+    return bg, attr, tiles
 
 
 def build(games, covers=None, query="", total=None):
@@ -421,32 +490,29 @@ def build(games, covers=None, query="", total=None):
     image[0x143] = 0x80
     image[0x147] = 0x19                                  # MBC5, no RAM
     image[0x148] = size.bit_length()-16
-    font, banner_font = [], []
-    for ch in range(32, 128):
+    font = bytearray()
+    for ch in range(32, 128):                            # bold heading font, colour 1 on 0
         rows = (*bytes.fromhex(FONT.get(chr(ch), '00000000000000')), 0)
-        font.extend(b for row in rows for b in (row << 1, 0))                    # colour 1 on 0
-        banner_font.extend(b for row in rows for b in (~(row << 1) & 0xFF, 0xFF))  # 2 on 3
-    tiles = wall_tiles()
-    tile = {name: WORLD + i for i, name in enumerate(tiles)}
-    world = b''.join(tile_bytes(t) for t in tiles.values())
-    image[FONT_TILES:FONT_TILES+0xE00] = (bytes(font) + bytes(banner_font) + world).ljust(0xE00, b'\0')
-    image[SPRITE_TILES:SPRITE_TILES+128] = frame_tiles()
+        font.extend(b for row in rows for b in ((row << 1 | row) & 0xFF, 0))
+    tiles1, codes = bank1_tiles()
     pages = max(1, math.ceil(count / PAGE))
     heading = f'FIND:{query} {count}/{total}' if query else 'SELECT GAME'
-    bg, attr = wall_maps(heading[:20], pages, tile)
+    bg, attr, wall = wall_maps(heading[:20], pages, codes)
+    bank0 = bytes(font) + b''.join(tile_bytes(t) for t in wall)
+    image[FONT_TILES:FONT_TILES+0x1000] = bank0.ljust(FRAME_TILE*16, b'\0') + frame_tiles()
+    image[BANK1_TILES:BANK1_TILES+len(tiles1)] = tiles1
     image[BG_MAP:BG_MAP+len(bg)], image[BG_ATTR:BG_ATTR+len(attr)] = bg, attr
-    image[BG_PALS:BG_PALS+64] = palettes(*[WALL]*8)
+    hidden = [WALL[0]]*4
+    image[BG_PALS:BG_PALS+64] = palettes(WALL, DIM, DIM, TITLE, BANNER, hidden, WALL, WALL)
     image[OBJ_PALS:OBJ_PALS+8] = palettes(FRAME)
-    image[IDLE_TEXT:IDLE_TEXT+40] = (
-        banner_text_tiles(' NO MATCHES' if query else ' NO GAMES YET')
-        + banner_text_tiles(' TRY ANOTHER SEARCH' if query else ' ADD .GB/.GBC FILES'))
-    image[LOAD_TEXT:LOAD_TEXT+20] = banner_text_tiles(' LOADING...')
-    blank = blank_record()
+    image[IDLE_TEXT:IDLE_TEXT+40] = banner_rows('NO MATCHES' if query else 'NO GAMES YET', codes)
+    image[LOAD_TEXT:LOAD_TEXT+40] = banner_rows('LOADING...', codes)
+    blank = blank_record(codes)
     image[BLANK_RECORD:BLANK_RECORD+len(blank)] = blank
     image[GAME_COUNT:GAME_COUNT+2] = count.to_bytes(2, 'little')
     image[LAST_PAGE:LAST_PAGE+2] = ((pages-1)*PAGE).to_bytes(2, 'little')
     for i, game in enumerate(games):
-        data = record(game, covers)
+        data = record(game, covers, codes)
         offset = 0x4000*(1 + i//PER_BANK) + (i % PER_BANK)*RECORD
         image[offset:offset+len(data)] = data
     image[0x14D] = -sum(image[0x134:0x14D])-25 & 255
