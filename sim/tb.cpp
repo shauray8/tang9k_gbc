@@ -2,6 +2,10 @@
 // PSRAM), echoes serial output, dumps the last frame as PPM.
 // usage: Vgb <rom.gb> <max_frames> <out.ppm>
 // GB_PRESS="from:to:mask,..." holds joypad mask (bit0=right..bit7=start) during frames [from,to)
+// GB_FRAME_HASH=path writes "event vsyncs ticks kind fnv1a64" per frame, taken when line 143's last
+// pixel lands (vblank entry): kind N rendered, F first frame after LCD on, O LCD off (all white,
+// one per 70224 dots since the previous event). Hash covers the 160x144 framebuffer as 16-bit LE words.
+// GB_FRAME_DUMP=N:path additionally writes hash event N's frame as PPM and stops the run there.
 #include "Vgb.h"
 #include "verilated.h"
 #include <cstdio>
@@ -46,6 +50,42 @@ int main(int argc, char **argv) {
     // GB_MEM_LATENCY: system clocks from request to read data (hardware PSRAM ~10).
     const int latency = getenv("GB_MEM_LATENCY") ? atoi(getenv("GB_MEM_LATENCY")) : 0;
     int read_due = 0; unsigned read_data = 0xFF;
+    auto write_ppm = [&](const char *path) {
+        FILE *f = fopen(path, "wb");
+        if (!f) { perror(path); return false; }
+        fprintf(f, "P6 160 144 255\n");
+        static const unsigned char shade[4] = {0xE0, 0xA8, 0x58, 0x10};
+        for (int y = 0; y < 144; y++) for (int x = 0; x < 160; x++) {
+            if (g->cgb_mode) {
+                unsigned v = fb[y][x];
+                for (int shift : {0, 5, 10}) {
+                    unsigned c = (v >> shift) & 31;
+                    fputc((c << 3) | (c >> 2), f);
+                }
+            } else {
+                unsigned char s = shade[fb[y][x] & 3];
+                fputc(s, f); fputc(s, f); fputc(s, f);
+            }
+        }
+        fclose(f);
+        return true;
+    };
+    FILE *fh = getenv("GB_FRAME_HASH") ? fopen(getenv("GB_FRAME_HASH"), "w") : nullptr;
+    int dump_event = 0; const char *dump_path = nullptr;
+    if (const char *d = getenv("GB_FRAME_DUMP")) { dump_event = atoi(d); dump_path = strchr(d, ':'); if (dump_path) dump_path++; }
+    int hash_events = 0; long long last_event = 0; bool lcd_was_off = false;
+    auto frame_hash = [&](char kind) {
+        unsigned long long h = 0xcbf29ce484222325ULL;
+        for (int y = 0; y < 144; y++) for (int x = 0; x < 160; x++) {
+            unsigned v = kind == 'O' ? (g->cgb_mode ? 0x7FFF : 0) : fb[y][x];
+            h = (h ^ (v & 0xFF)) * 0x100000001b3ULL;
+            h = (h ^ (v >> 8)) * 0x100000001b3ULL;
+        }
+        if (fh) fprintf(fh, "%d %d %lld %c %016llx\n", ++hash_events, frames, ticks, kind, h);
+        else ++hash_events;
+        last_event = ticks;
+        if (dump_path && hash_events == dump_event) { write_ppm(dump_path); max_ticks = ticks; }
+    };
     while (ticks < max_ticks) {
         // Same fractional enable as the 27 MHz system domain.
         g->clk_en_fast = acc >= 154776 && acc < 225000;
@@ -63,6 +103,15 @@ int main(int argc, char **argv) {
         }
         if (g->pix_we && g->pix_y < 144 && g->pix_x < 160)
             fb[g->pix_y][g->pix_x] = g->cgb_mode ? g->pix_rgb : g->pix;
+        if (fh || dump_path) {
+            if (!g->lcd_on) {
+                lcd_was_off = true;
+                if (ticks - last_event >= 70224) frame_hash('O');
+            } else if (g->pix_we && g->pix_y == 143 && g->pix_x == 159) {
+                frame_hash(lcd_was_off ? 'F' : 'N');
+                lcd_was_off = false;
+            }
+        }
         if (g->vsync) {
             frames++;
             int m = 0;
@@ -84,23 +133,8 @@ int main(int argc, char **argv) {
             if (ser.find("Passed") != std::string::npos || ser.find("Failed") != std::string::npos) break;
         }
     }
-    FILE *f = fopen(out, "wb");
-    if (!f) { perror(out); return 2; }
-    fprintf(f, "P6 160 144 255\n");
-    static const unsigned char shade[4] = {0xE0, 0xA8, 0x58, 0x10};
-    for (int y = 0; y < 144; y++) for (int x = 0; x < 160; x++) {
-        if (g->cgb_mode) {
-            unsigned v = fb[y][x];
-            for (int shift : {0, 5, 10}) {
-                unsigned c = (v >> shift) & 31;
-                fputc((c << 3) | (c >> 2), f);
-            }
-        } else {
-            unsigned char s = shade[fb[y][x] & 3];
-            fputc(s, f); fputc(s, f); fputc(s, f);
-        }
-    }
-    fclose(f);
+    if (fh) fclose(fh);
+    if (!write_ppm(out)) return 2;
     printf("\n[tb] ticks=%lld frames=%d pc=%04x\n", ticks, frames, g->pc_dbg);
     delete g;
     return ser.find("Failed") != std::string::npos ? 1 : 0;
