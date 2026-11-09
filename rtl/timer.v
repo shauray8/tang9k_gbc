@@ -30,9 +30,11 @@ module gb_timer (
     reg [2:0] ntac;
     reg [8:0] t9;
     reg nirq, novf;
+    reg [15:0] tdiv;              // counter after this M-cycle's four ticks, before any write
     // next state if this M-cycle completes (writes included; reads have no write)
     always @(*) begin
-        ndiv = div_reset ? 16'd0 : div + 16'd4;
+        tdiv = div_reset ? 16'd0 : div + 16'd4;
+        ndiv = tdiv;
         ntac = tac;
         if (sel && wr && addr_lo[1:0] == 2'd0) ndiv = 0;
         if (sel && wr && addr_lo[1:0] == 2'd3) ntac = din[2:0];
@@ -44,8 +46,10 @@ module gb_timer (
         // (TMA wins there) and cancels a pending reload when it lands on the overflow.
         if (sel && wr && addr_lo[1:0] == 2'd1 && !ovf) t9 = {1'b0, din};
         if (sel && wr && addr_lo[1:0] == 2'd2 && ovf) t9 = {1'b0, din};
-        // falling edge of the selected bit increments TIMA
-        if (tbit(div, tac) && !tbit(ndiv, ntac) && !(sel && wr && addr_lo[1:0] == 2'd1 && !ovf)) begin
+        // A falling edge of the selected bit increments TIMA: either from this cycle's ticks,
+        // or when a DIV reset / TAC write at the end of the cycle drops the bit.
+        if (((tbit(div, tac) && !tbit(tdiv, tac)) || (tbit(tdiv, tac) && !tbit(ndiv, ntac)))
+            && !(sel && wr && addr_lo[1:0] == 2'd1 && !ovf)) begin
             t9 = t9 + 1;
             if (t9[8]) novf = 1;
         end
