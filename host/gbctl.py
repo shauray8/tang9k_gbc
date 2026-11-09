@@ -35,6 +35,10 @@ BOOT_ROM = os.environ.get("GB_BOOT_ROM", os.path.join(ROOT, "..", "tools-ref", "
 BOOT_BASE = 0x3D0000   # boot ROM image in PSRAM; ROMs above this size run without it
 
 
+class _Gone(Exception):
+    """The bridge dropped off USB while it was being set up."""
+
+
 class Link:
     def __init__(self):
         L = self.L = ctypes.CDLL(LIBUSB)
@@ -52,28 +56,63 @@ class Link:
         L.libusb_error_name.restype = ctypes.c_char_p
         self.ctx = V()
         L.libusb_init(ctypes.byref(self.ctx))
-        self.h = L.libusb_open_device_with_vid_pid(self.ctx, VID, PID)
-        if not self.h:
+        self.h, self._opening = None, False
+        error = self._open()
+        if error:
             L.libusb_exit(self.ctx)
-            sys.exit("Tang Nano 9K not found on USB (check cable / re-plug)")
-        r = L.libusb_claim_interface(self.h, IFACE)
-        if r:
-            L.libusb_close(self.h)
-            L.libusb_exit(self.ctx)
-            sys.exit(f"cannot claim UART interface: {L.libusb_error_name(r).decode()}")
-        # Initialize the UART explicitly after USB reconnect: 115200 baud,
-        # 8N1, no flow control. These are FTDI vendor requests, not termios.
-        for request, value in ((3, SLOW[1]), (4, 8), (2, 0)):
-            r = L.libusb_control_transfer(self.h, 0x40, request, value, CH, None, 0, 1000)
-            if r < 0:
-                self.close()
-                sys.exit(f"UART setup failed: {L.libusb_error_name(r).decode()}")
-        self.baud = SLOW[2]
-        # Send a harmless released-buttons packet to warm up the bridge.
-        self.write(b"J\x00J\x00")
-        self.read(0.1)
-        if os.environ.get("GB_BAUD") != "slow":
-            self.negotiate()
+            sys.exit(error)
+
+    def _open(self):
+        """Open, claim and configure the bridge; returns an error message or None."""
+        L = self.L
+        self._opening = True
+        try:
+            self.h = L.libusb_open_device_with_vid_pid(self.ctx, VID, PID)
+            if not self.h:
+                return "Tang Nano 9K not found on USB (check cable / re-plug)"
+            r = L.libusb_claim_interface(self.h, IFACE)
+            if r:
+                self._drop()
+                return f"cannot claim UART interface: {L.libusb_error_name(r).decode()}"
+            # Initialize the UART explicitly after USB reconnect: 115200 baud,
+            # 8N1, no flow control. These are FTDI vendor requests, not termios.
+            for request, value in ((3, SLOW[1]), (4, 8), (2, 0)):
+                r = L.libusb_control_transfer(self.h, 0x40, request, value, CH, None, 0, 1000)
+                if r < 0:
+                    self._drop()
+                    return f"UART setup failed: {L.libusb_error_name(r).decode()}"
+            self.baud = SLOW[2]
+            # Send a harmless released-buttons packet to warm up the bridge.
+            self.write(b"J\x00J\x00")
+            self.read(0.1)
+            if os.environ.get("GB_BAUD") != "slow":
+                self.negotiate()
+            return None
+        except _Gone:
+            self._drop()
+            return "USB connection dropped during setup"
+        finally:
+            self._opening = False
+
+    def _drop(self):
+        if self.h:
+            self.L.libusb_release_interface(self.h, IFACE)
+            self.L.libusb_close(self.h)
+        self.h = None
+
+    def reconnect(self, seconds=60):
+        """The bridge left the bus (e.g. an HDMI cable was plugged in): wait for it to return."""
+        if self._opening:
+            raise _Gone
+        print("USB connection lost, reconnecting...", flush=True)
+        self._drop()
+        end = time.time() + seconds
+        while time.time() < end:
+            time.sleep(1)
+            if self._open() is None:
+                print(f"reconnected at {self.baud} baud", flush=True)
+                return
+        sys.exit("the board did not come back on USB within a minute; re-plug it")
 
     def _set_host_rate(self, ftdi, baud):
         # The board's BL702 firmware applies a new rate only with the next 8N1 line-format
@@ -137,17 +176,20 @@ class Link:
         n = ctypes.c_int()
         for i in range(0, len(data), 4096):
             chunk = data[i:i + 4096]
-            for attempt in range(3):
+            for attempt in range(4):
                 r = self.L.libusb_bulk_transfer(self.h, EP_OUT, ctypes.create_string_buffer(chunk, len(chunk)),
                                                 len(chunk), ctypes.byref(n), 5000)
                 if r == 0:
                     break
-                # The BL702 bridge occasionally stalls its endpoint (PIPE): clear it and resend
-                # the part it did not accept, instead of leaving the bridge wedged.
-                self.L.libusb_clear_halt(self.h, EP_OUT)
-                self.L.libusb_clear_halt(self.h, EP_IN)
-                chunk = chunk[n.value:]
-                time.sleep(0.05)
+                if r == -9 and attempt < 2:
+                    # The BL702 bridge occasionally stalls its endpoint (PIPE): clear it and
+                    # resend the part it did not accept.
+                    self.L.libusb_clear_halt(self.h, EP_OUT)
+                    self.L.libusb_clear_halt(self.h, EP_IN)
+                    chunk = chunk[n.value:]
+                    time.sleep(0.05)
+                else:
+                    self.reconnect()               # gone or wedged: reopen, resend this chunk
             else:
                 sys.exit(f"USB write failed: {self.L.libusb_error_name(r).decode()} (re-plug the board)")
 
@@ -161,14 +203,16 @@ class Link:
             if r == -9:                                   # LIBUSB_ERROR_PIPE: stalled endpoint
                 self.L.libusb_clear_halt(self.h, EP_IN)
                 continue
+            if r in (-4, -1):                             # NO_DEVICE / IO: bridge left the bus
+                self.reconnect()
+                return out
             d = buf.raw[:n.value]
             for i in range(0, len(d), 64):
                 out += d[i + 2:i + 64]
         return out
 
     def close(self):
-        self.L.libusb_release_interface(self.h, IFACE)
-        self.L.libusb_close(self.h)
+        self._drop()
         self.L.libusb_exit(self.ctx)
 
 
