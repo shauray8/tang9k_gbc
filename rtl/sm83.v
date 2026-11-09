@@ -175,17 +175,17 @@ module sm83 (
                         3'd3: idle;
                         default: begin intm = 0; fetch; end
                     endcase
-                end else if (mc == 0 && halt) begin
-                    if (pend != 0) begin
-                        halt = 0;
-                        if (IME) begin IME = 0; intm = 1; idle; end
-                        else fetch;
-                    end else fetch;
+                end else if (mc == 0 && halt && (pend == 0 || IME)) begin
+                    if (pend != 0) begin halt = 0; IME = 0; intm = 1; idle; end
+                    else fetch;
                 end else if (mc == 0 && IME && pend != 0) begin
                     // discard fetched opcode, dispatch interrupt
                     IME = 0; intm = 1; idle;
                 end else begin
                     if (mc == 0) begin
+                        // HALT with IME=0 resumes on the opcode its last halted cycle fetched,
+                        // costing no extra cycle (same timing as a run of NOPs).
+                        halt = 0;
                         if (ime_delay) begin IME = 1; ime_delay = 0; end
                         // HALT bug: the byte after HALT is fetched twice (PC does not advance).
                         IR = d; if (haltbug) haltbug = 0; else PC = PC + 1;
