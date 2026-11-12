@@ -47,12 +47,22 @@ module gb_timer (
         // (TMA wins there) and cancels a pending reload when it lands on the overflow.
         if (sel && wr && addr_lo[1:0] == 2'd1 && !ovf) t9 = {1'b0, din};
         if (sel && wr && addr_lo[1:0] == 2'd2 && ovf) t9 = {1'b0, din};
-        // A falling edge of the selected bit increments TIMA: either from this cycle's ticks,
-        // or when a DIV reset / TAC write at the end of the cycle drops the bit.
-        if (((tbit(div, tac) && !tbit(tdiv, tac)) || (tbit(tdiv, tac) && !tbit(ndiv, ntac)))
-            && !(sel && wr && addr_lo[1:0] == 2'd1 && !ovf)) begin
-            t9 = t9 + 1;
-            if (t9[8]) novf = 1;
+        // A falling edge of the selected bit increments TIMA. DIV/TAC writes can drop the
+        // timer input at the write edge. TAC itself becomes visible before the last of this
+        // M-cycle's four divider ticks: an enable therefore also sees a natural fall only
+        // when tdiv lands exactly on the selected divider boundary.
+        // OR the causes: coincident clock/write edges are one physical falling edge.
+        if (((tbit(div, tac) && !tbit(tdiv, tac)) ||
+            (sel && wr && addr_lo[1:0] == 2'd3 && !tac[2] && ntac[2] &&
+             tbit(div, ntac) && !tbit(tdiv, ntac) &&
+             ((ntac[1:0] == 2'd0 && tdiv[9:0] == 0) ||
+              (ntac[1:0] == 2'd1 && tdiv[3:0] == 0) ||
+              (ntac[1:0] == 2'd2 && tdiv[5:0] == 0) ||
+              (ntac[1:0] == 2'd3 && tdiv[7:0] == 0))) ||
+            (tbit(tdiv, tac) && !tbit(ndiv, ntac))) &&
+            !(sel && wr && addr_lo[1:0] == 2'd1 && !ovf)) begin
+            t9 = t9 + 1'b1;
+            novf = t9[8];
         end
     end
 
@@ -66,7 +76,8 @@ module gb_timer (
     always @(posedge clk) begin
         irq <= 0;
         if (rst) begin
-            div <= boot ? 16'h0008 : 16'hABCC; tima <= 0; tma <= 0; tac <= 0; ovf <= 0;
+            // CGB ABCDE post-boot value and sub-M-cycle phase. A mapped boot ROM starts at 0008.
+            div <= boot ? 16'h0008 : 16'h2677; tima <= 0; tma <= 0; tac <= 0; ovf <= 0;
         end else if (ce || div_reset) begin
             if (ce && sel && wr && addr_lo[1:0] == 2'd2) tma <= din;
             irq <= nirq;
