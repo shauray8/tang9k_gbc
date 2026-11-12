@@ -9,14 +9,14 @@ ROM    ?=
 RELEASE ?= 0                 # 1: drop the debug UART commands (diagnose, header, scanout)
 BUILD  := build/fpga$(if $(filter 1,$(RELEASE)),-release,)
 YOSYS_DEFS := $(if $(filter 1,$(RELEASE)),-DRELEASE,)
-RTL    := rtl/top.v rtl/pll_video.v rtl/pll_psram.v rtl/hdmi.v rtl/spi_rom_loader.v rtl/cart_loader.v rtl/psram_bridge.v rtl/psram_controller.v rtl/uart_rx.v rtl/uart_tx.v rtl/gb.v rtl/sm83.v rtl/timer.v rtl/ppu.v
+RTL    := rtl/top.v rtl/pll_video.v rtl/pll_psram.v rtl/hdmi.v rtl/spi_rom_loader.v rtl/cart_loader.v rtl/psram_bridge.v rtl/psram_controller.v rtl/uart_rx.v rtl/uart_tx.v rtl/gb.v rtl/sm83.v rtl/timer.v rtl/apu.v rtl/ppu.v
 RTL += rtl/psram_test.v rtl/video_buffer.v
 RTL += rtl/mbc3_rtc.v
 RTL += rtl/menu_bridge.v rtl/host_mem.v rtl/overlay.v
 CST    := boards/tangnano9k/tangnano9k.cst
 SDC    := boards/tangnano9k/tangnano9k.sdc
 DEVICE := GW1NR-LV9QN88PC6/I5
-PNR_SEED ?= 14  # `make release`: qualified with sim/hwstress/qualify.sh (seed 28 fails it); debug builds need their own run
+PNR_SEED ?= 2   # release seed; every distributed image still requires sim/hwstress/qualify.sh
 FAMILY := GW1N-9C
 
 .PHONY: all bitstream release prog flash rom sim clean arcade
