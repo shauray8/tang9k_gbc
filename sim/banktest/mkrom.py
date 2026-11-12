@@ -76,7 +76,7 @@ def start(a, cgb=False):
     a.emit(0xF3)                     # DI
     a.w16(0x31, 0xFFFE)              # LD SP,FFFE
     a.emit(0x1E, 0x00)               # LD E,0
-    a.chk(0xFF90, 0x11 if cgb else 0x01, 'Boot A identifies the selected CPU model')
+    a.chk(0xFF90, 0x11, 'CGB hardware post-boot A is 11 in DMG compatibility mode too')
     a.wr(0xFF40, 0x00)               # LCD off: VRAM/OAM freely accessible
     for i, v in enumerate(DMA_ROUTINE):
         a.wr(0xFF80 + i, v)
@@ -143,7 +143,7 @@ def dmg_program(a):
     a.wr(0xFF4D, 1)
     a.chk(0xFF4D, 0xFF, 'DMG: KEY1 writes are ignored and reads stay FF')
     a.chk(0xFF70, 0xFF, 'DMG: SVBK reads FF')
-    a.chk(0xFF4F, 0xFF, 'DMG: VBK reads FF')
+    a.chk(0xFF4F, 0xFE, 'CGB hardware exposes VBK while rendering a DMG cartridge')
     for addr, v in ((0xC000, 0xC0), (0xCFFF, 0xCF), (0xD000, 0xD0), (0xDFFF, 0xDF), (0xDDFF, 0xDD)):
         a.wr(addr, v)
     a.wr(0xFF70, 0x03)
@@ -175,7 +175,7 @@ def dmg_program(a):
     a.wr(0x8000, 0xA0)
     a.wr(0x9FFF, 0xA9)
     a.wr(0xFF4F, 0x01)
-    a.chk(0xFF4F, 0xFF, 'DMG: VBK write ignored (reads FF)')
+    a.chk(0xFF4F, 0xFF, 'CGB hardware stores VBK while DMG VRAM remains single-bank')
     a.wr(0x8000, 0xB1)
     a.wr(0xFF4F, 0x00)
     a.chk(0x8000, 0xB1, 'DMG: VRAM single bank')
