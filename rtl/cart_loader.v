@@ -17,6 +17,7 @@ module cart_loader (
     output reg [1:0]  cart_type,    // 0 none, 1 MBC1 or MBC2, 2 MBC3, 3 MBC5
     output reg        cart_rtc,     // header types 0F/10 have an MBC3 timer
     output reg        cart_mbc2,    // header types 05/06: MBC2 with built-in 512 x 4-bit RAM
+    output reg        cart_mbc1m,   // repeated sub-cart header: MBC1 multicart wiring
     output reg        cart_ram,     // header RAM size is nonzero
     output reg [8:0]  rom_mask,
     output reg [3:0]  ram_mask,
@@ -24,6 +25,7 @@ module cart_loader (
 );
     reg [21:0] idx, last;
     reg slot_v; reg [7:0] slot;
+    reg multi_logo;
     reg active;
     assign full = slot_v || m_busy;
     assign m_req = active && slot_v && !m_busy;
@@ -33,6 +35,7 @@ module cart_loader (
         if (start) begin
             idx <= 0; last <= 22'h3DFFFF; slot_v <= 0; active <= 1; done <= 0; sum <= 0;
             cgb_mode <= 0; cart_rtc <= 0; cart_ram <= 0; cart_mbc2 <= 0;
+            cart_mbc1m <= 0; multi_logo <= 0;
         end else begin
             if (in_v && active) begin slot <= in_d; slot_v <= 1; end
             if (m_req) begin
@@ -55,6 +58,12 @@ module cart_loader (
                                     slot == 8'h05 ? 4'h7 : 4'h0;
                         cart_ram <= slot >= 8'h01 && slot <= 8'h05 || cart_mbc2;
                     end
+                    // MBC1 multicarts repeat the Nintendo logo at bank 16. Four bytes at
+                    // the fixed secondary-header offset avoid title-specific heuristics.
+                    22'h40104: multi_logo <= slot == 8'hCE;
+                    22'h40105: multi_logo <= multi_logo && slot == 8'hED;
+                    22'h40106: multi_logo <= multi_logo && slot == 8'h66;
+                    22'h40107: cart_mbc1m <= multi_logo && slot == 8'h66;
                     default: ;
                 endcase
                 if (idx == last) begin active <= 0; done <= 1; end

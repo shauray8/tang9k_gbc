@@ -17,14 +17,22 @@ ROOT = Path(__file__).resolve().parents[1]
 VGB = ROOT / 'build/obj/Vgb'
 
 
-def applies(name):
-    """Mooneye model tags: upper-case groups (C = CGB, A = AGB, S = SGB, G = DMG...) or
-    explicit revisions (dmg0, mgb, cgb0, cgbABCDE). This core is a CGB."""
+def model_tag(name):
     m = re.search(r'-([A-Za-z0-9]+)$', name)
-    if not m:
+    return m.group(1) if m else ''
+
+
+def applies(name):
+    """This core targets CGB ABCDE. CGB0 has a mutually exclusive boot-DIV phase."""
+    if name == 'rom_64Mb':
+        return False
+    tag = model_tag(name)
+    if not tag:
         return True
-    tag = m.group(1)
+    if tag.lower() == 'cgb0':
+        return False
     return tag.lower().startswith('cgb') or (tag.isupper() and 'C' in tag)
+
 
 
 def run(rom):
