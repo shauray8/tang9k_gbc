@@ -63,6 +63,10 @@ IO_PORT "joy_n[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_PORT "joy_n[6]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_PORT "joy_n[7]" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
+// Mono sigma-delta audio: J5 pin 11 (RGB_DE). Feed a powered amplifier through RC + AC coupling.
+IO_LOC "audio_pwm" 33;
+IO_PORT "audio_pwm" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=4;
+
 // BL702 USB-UART (schematic: FPGA_RX = pin 18, FPGA_TX = pin 17)
 IO_LOC "uart_rx" 18;
 IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;

@@ -16,6 +16,7 @@ module top (
     input  [7:0] joy_n,          // header buttons to GND: {start, select, b, a, down, up, left, right}
     input        uart_rx,        // BL702 USB-UART (FPGA_RX, pin 18)
     output       uart_tx,        // BL702 USB-UART (FPGA_TX, pin 17)
+    output       audio_pwm,      // mono 1-bit DAC to a powered amplifier input
     output [5:0] led_n,
     output       tmds_clk_p, tmds_clk_n,
     output [2:0] tmds_d_p, tmds_d_n,
@@ -146,7 +147,7 @@ module top (
         .armed(menu_running)
     );
     wire [1:0] cart_type; wire [8:0] rom_mask; wire [3:0] ram_mask; wire [7:0] lsum;
-    wire cgb_mode, cart_rtc, cart_ram, cart_mbc2;
+    wire cgb_mode, cart_rtc, cart_ram, cart_mbc2, cart_mbc1m;
     // Freeze gates the core's clock enables. Resume first reissues the held bus access,
     // then waits until its reply is valid before the core advances again.
     // 'P' 3/4 enables/disables the boot ROM (uploaded to 3D0000) for the next game start.
@@ -275,7 +276,7 @@ module top (
         .full(ld_full), .done(ld_done),
         .m_req(ld_m_req), .m_addr(ld_m_addr), .m_wd(ld_m_wd), .m_busy(b_busy),
         .cgb_mode(cgb_mode), .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
-        .cart_mbc2(cart_mbc2),
+        .cart_mbc2(cart_mbc2), .cart_mbc1m(cart_mbc1m),
         .rom_mask(rom_mask), .ram_mask(ram_mask), .sum(lsum)
     );
 
@@ -303,7 +304,7 @@ module top (
 
     // ---------------- Game Boy ----------------
     wire pix_we; wire [1:0] pix; wire [14:0] pix_rgb; wire [7:0] px, py;
-    wire gb_vsync, tick, tick_fast;
+    wire gb_vsync, tick, tick_fast; wire [9:0] audio_sample;
     wire [7:0] jb = joy | ubtn;          // {start, select, b, a, down, up, left, right}
     // S2 opens the overlay (bounce only re-opens an open overlay, which is a no-op).
     reg s2_d;
@@ -312,6 +313,12 @@ module top (
     // The boot ROM choice applies from the next core reset: boot_en is only the preference
     // (host 'P' 3/4, overlay toggle); boot_run is what the running game was started with.
     reg boot_run;
+`ifdef RELEASE
+    // Audio and core accuracy take priority over the optional in-game overlay on the 9K.
+    assign core_pad = jb;
+    assign ov_on = 0; assign ov_sel = 0; assign ov_pal = 0; assign ov_reset = 0;
+    assign ov_boot_toggle = 0; assign ov_ev_valid = 0; assign ov_ev_code = 0;
+`else
     overlay_ctl overlay (
         .clk(clk_sys), .rst(rst), .enable(vst == 3'd5 && test_pass && !menu_running),
         .open(host_open || (btn_sync[14] && !s2_d)), .close_all(u_start || fl_start),
@@ -320,6 +327,7 @@ module top (
         .core_pad(core_pad), .ev_valid(ov_ev_valid), .ev_code(ov_ev_code),
         .ev_take(ov_ack)
     );
+`endif
     // Overlay reset: 64 clocks, so a bus request still in flight completes before the
     // core's first fetch (the bridge drops requests while busy).
     reg [5:0] ov_rst_cnt;
@@ -336,7 +344,9 @@ module top (
         .cgb_mode(cgb_mode), .boot_en(boot_run), .boot_active(boot_active),
         .pix_we(pix_we), .pix(pix), .pix_rgb(pix_rgb), .pix_x(px), .pix_y(py), .vsync(gb_vsync),
         .lcd_on(lcd_on),
-        .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram), .cart_mbc2(cart_mbc2),
+        .audio_sample(audio_sample),
+        .cart_type(cart_type), .cart_rtc(cart_rtc), .cart_ram(cart_ram),
+        .cart_mbc2(cart_mbc2), .cart_mbc1m(cart_mbc1m),
         .rom_mask(rom_mask), .ram_mask(ram_mask),
         .ext_addr(g_addr), .ext_req(g_req), .ext_we(g_we), .ext_wd(g_wd), .ext_rd(b_rd),
         .bus_resume(bus_resume), .rtc_host_load(rtc_load), .rtc_host_d(rtc_d), .rtc_live(rtc_live),
@@ -350,6 +360,10 @@ module top (
     assign b_addr = !test_done ? test_addr : !ld_done ? ld_m_addr : vst == 3'd1 ? 22'h104 :
                     vst == 3'd3 ? 22'h105 : hm_busy ? hm_addr : g_addr;
     assign b_wd   = !test_done ? test_wd : !ld_done ? ld_m_wd : hm_busy ? hm_wd : g_wd;
+
+    // Fixed-level compatibility voice. The external RC filter and amplifier
+    // AC-couple this 3.3 V square bitstream; never connect a passive speaker directly.
+    assign audio_pwm = audio_sample[9];
 
     // ---------------- 720p video: GB clock enable, frame lock, 6-line ring, 5x scaler ----------------
     wire [7:0] vr, vg, vb; wire vde, vhs, vvs;
