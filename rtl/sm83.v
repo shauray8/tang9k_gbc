@@ -8,7 +8,6 @@ module sm83 (
     input             clk,
     input             rst,
     input             ce,
-    input             cgb_mode, // selects documented post-boot CPU state; stable through reset
     input             boot,     // a boot ROM is mapped: start from its power-on state at 0000
     output reg [15:0] addr,
     output reg [7:0]  dout,
@@ -24,7 +23,8 @@ module sm83 (
     reg [15:0] SP, PC;
     reg [2:0] mc;
     reg IME, ime_delay, halt, intm, haltbug;
-    reg [4:0] IF, IE;
+    reg [4:0] IF;
+    reg [7:0] IE;
 
     assign halted = halt;
     assign pc_dbg = PC;
@@ -40,7 +40,7 @@ module sm83 (
     reg [4:0] pend_r;
     always @(posedge clk) din_r <= din;
     wire [7:0] din_e = (addr == 16'hFF0F) ? {3'b111, IF} :
-                       (addr == 16'hFFFF) ? {3'b000, IE} : din_r;
+                       (addr == 16'hFFFF) ? IE : din_r;
 
     wire fZ = F[7], fN = F[6], fH = F[5], fC = F[4];
 
@@ -143,19 +143,19 @@ module sm83 (
     always @(posedge clk) begin
         stop_req <= 0;
         if (rst) begin
-            A = cgb_mode ? 8'h11 : 8'h01; F = cgb_mode ? 8'h80 : 8'hB0;
-            B = 0; C = cgb_mode ? 8'h00 : 8'h13;
-            D = cgb_mode ? 8'hFF : 8'h00; E = cgb_mode ? 8'h56 : 8'hD8;
-            H = cgb_mode ? 8'h00 : 8'h01; L = cgb_mode ? 8'h0D : 8'h4D;
+            // Target hardware is always CGB. A mapped boot ROM starts at 0000 and replaces
+            // these values; bypass-boot starts from the CGB ABCDE post-boot state at 0100.
+            A = 8'h11; F = 8'h80; B = 0; C = 0;
+            D = 0; E = 8'h08; H = 0; L = 8'h7C;
             SP = 16'hFFFE; IR = 0; Z = 0; W = 0;   // post-boot-ROM state unless booting
             PC = boot ? 16'h0000 : 16'h0100;
-            mc = 0; IME = 0; ime_delay = 0; halt = 0; intm = 0; haltbug = 0; IF = 0; IE = 0;
+            mc = 0; IME = 0; ime_delay = 0; halt = 0; intm = 0; haltbug = 0; IF = boot ? 0 : 1; IE = 0;
             addr <= boot ? 16'h0000 : 16'h0100; wr <= 0; rd <= 1; dout <= 0;
         end else begin
             if (ce) begin
                 // commit IF/IE writes of the cycle that just ended
                 if (wr && addr == 16'hFF0F) IF = dout[4:0];
-                if (wr && addr == 16'hFFFF) IE = dout[4:0];
+                if (wr && addr == 16'hFFFF) IE = dout;
                 d = din_e;
                 nA = PC; nW = 0; nR = 1; nD = 0;
                 pend = pend_r;
@@ -165,7 +165,10 @@ module sm83 (
                         3'd1: begin SP = SP - 1; wrm(SP, PC[15:8]); end
                         3'd2: begin
                             SP = SP - 1; wrm(SP, PC[7:0]);
-                            casez (pend)
+                            // The high-byte stack write may have just targeted IE (SP=0000).
+                            // Vector selection sees that committed value; the lower-byte write
+                            // (SP=0001) is scheduled here and is too late to change the choice.
+                            casez (IE[4:0] & IF)
                                 5'b????1: begin PC = 16'h40; IF[0] = 0; end
                                 5'b???10: begin PC = 16'h48; IF[1] = 0; end
                                 5'b??100: begin PC = 16'h50; IF[2] = 0; end
@@ -452,7 +455,7 @@ module sm83 (
                 addr <= nA; wr <= nW; rd <= nR; dout <= nD;
             end
             IF = IF | irq;
-            pend_r <= IE & IF;
+            pend_r <= IE[4:0] & IF;
         end
     end
 endmodule
