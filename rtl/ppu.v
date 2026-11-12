@@ -14,6 +14,8 @@ module ppu (
     input             ce_t,
     input             ce,
     input             cgb_mode,
+    input             cgb_hw,     // physical CGB register availability, independent of compatibility mode
+    input             cgb_post_boot, // bypassed CGB boot-ROM palette-index state
     input             dmg_color,   // CGB running a DMG cart: shades index palette RAM 0 (BG), 0/1 (OBJ)
     input             boot,        // power-on through a boot ROM: LCD starts off
     input      [15:0] cpu_addr,
@@ -51,6 +53,7 @@ module ppu (
     reg [7:0] ly;
     reg [8:0] dot;
     reg [1:0] mode;
+    reg lyc_match;               // comparison clock stops with LCD off; STAT bit 2 is retained
     assign pix_y = ly;
     assign lcd_on = LCDC[7];
     assign hblank = LCDC[7] && ly < 8'd144 && mode == 2'd0;
@@ -112,7 +115,7 @@ module ppu (
     reg [12:0] s_ad[0:9];         // {tile, row-in-object, yflip}; size applied at fetch (mode 3) like hw
     reg [7:0] s_lo [0:9], s_hi[0:9];
     reg [6:0] s_at [0:9];         // {prio, xflip, DMG pal, CGB bank, CGB pal[2:0]}
-    reg [3:0] s_cnt, s_fp;        // slots found, fetch pointer
+    reg [3:0] s_cnt, s_seen, s_fp; // 10-hit OAM limit; only X<168 entries need pattern fetches
     reg s_fhi;                    // fetching hi byte
     reg s_pend;                   // a sprite byte read is outstanding
     reg [3:0] s_pslot; reg s_phi;
@@ -138,6 +141,9 @@ module ppu (
     reg [7:0] l_lo, l_hi; reg [3:0] l_at; reg l_valid;
     reg [7:0] sh_lo, sh_hi; reg [3:0] sh_at; reg [3:0] sh_cnt;   // *_at = {BG priority, CGB palette}
     reg [7:0] px;                // 0..167, screen x = px-8
+    reg [6:0] obj_penalty;        // exact mode-3 OBJ stalls accumulated left-to-right
+    reg [5:0] obj_tile;
+    reg obj_tile_valid;
     reg [2:0] discard;
     reg win_mode, win_line_used, wy_hit;
     reg [7:0] wly;
@@ -167,6 +173,12 @@ module ppu (
             if (k < s_cnt && !s_done[k] && s_x[k] == px) begin m_hit = 1; m_s = k; end
     end
     wire spr_on = LCDC[1];
+    wire [8:0] obj_pos = {1'b0, s_x[m_s]} + {1'b0, SCX};
+    wire [5:0] obj_tile_now = obj_pos[8:3];
+    wire [2:0] obj_phase = obj_pos[2:0];
+    wire [3:0] obj_wait = obj_phase < 5 ? 5 - obj_phase : 0;
+    wire [8:0] mode3_last = 9'd251 + {6'd0, SCX[2:0]} + obj_penalty +
+                            (win_line_used ? 9'd6 : 9'd0);
 
     // ---------------- pixel mixer (head of the BG shifter and sprite FIFO) ----------------
     // DMG: LCDC.0 blanks BG/window; OBJ wins unless its behind-BG flag is set and BG colour != 0.
@@ -208,7 +220,7 @@ module ppu (
                         r_obj ? {ocr_hq[6:0], ocr_lq} : {bcr_hq[6:0], bcr_lq};
 
     // ---------------- CPU reads ----------------
-    wire lyc_eq = ly == LYC;
+    wire lyc_eq = lyc_match;
     always @(*) begin
         cpu_dout = 8'hFF;
         if (vram_sel) cpu_dout = cpu_vram_ok ? cpu_vq : 8'hFF;
@@ -217,12 +229,12 @@ module ppu (
                 2'd0: cpu_dout = o_y; 2'd1: cpu_dout = o_x; 2'd2: cpu_dout = o_t; default: cpu_dout = o_a;
             endcase
         end else if (cpu_addr[5]) begin          // FF68-FF6C
-            if (cgb_mode) case (cpu_addr[3:0])
+            if (cgb_hw) case (cpu_addr[3:0])
                 4'h8: cpu_dout = {bcps[6], 1'b1, bcps[5:0]};
-                4'h9: cpu_dout = cpu_pal_ok ? (bcps[0] ? bcr_hq : bcr_lq) : 8'hFF;
+                4'h9: cpu_dout = cgb_mode && cpu_pal_ok ? (bcps[0] ? bcr_hq : bcr_lq) : 8'hFF;
                 4'hA: cpu_dout = {ocps[6], 1'b1, ocps[5:0]};
-                4'hB: cpu_dout = cpu_pal_ok ? (ocps[0] ? ocr_hq : ocr_lq) : 8'hFF;
-                4'hC: cpu_dout = {7'h7F, opri};
+                4'hB: cpu_dout = cgb_mode && cpu_pal_ok ? (ocps[0] ? ocr_hq : ocr_lq) : 8'hFF;
+                4'hC: cpu_dout = cgb_mode ? {7'h7F, opri} : 8'hFF;
                 default: ;
             endcase
         end else case (cpu_addr[3:0])            // FF40-FF4F
@@ -237,15 +249,20 @@ module ppu (
             4'h9: cpu_dout = OBP1;
             4'hA: cpu_dout = WY;
             4'hB: cpu_dout = WX;
-            4'hF: cpu_dout = cgb_mode ? {7'h7F, vbk} : 8'hFF;
+            4'hF: cpu_dout = cgb_hw ? {7'h7F, vbk} : 8'hFF;
             default: cpu_dout = 8'hFF;
         endcase
     end
 
     // STAT interrupt line
-    wire stat_line = LCDC[7] && ((STATW[3] && lyc_eq) || (STATW[2] && mode == 2'd2) ||
-                                 (STATW[1] && mode == 2'd1) || (STATW[0] && mode == 2'd0));
+    // The FPGA is CGB hardware even while a DMG cart selects compatibility mode.
+    wire cgb_pre_vblank_m2 = ly == 8'd143 && dot >= 9'd452;
+    wire stat_line = (STATW[3] && lyc_eq) ||
+                     (LCDC[7] && ((STATW[2] && (mode == 2'd2 || cgb_pre_vblank_m2)) ||
+                                  (STATW[1] && mode == 2'd1) ||
+                                  (STATW[0] && mode == 2'd0)));
     reg stat_prev;
+    reg [2:0] vb_delay;
 
     reg [7:0] mlo, mhi;
     reg [1:0] mc;
@@ -256,25 +273,31 @@ module ppu (
         if (rst) begin
             LCDC <= boot ? 8'h00 : 8'h91; STATW <= 0; SCY <= 0; SCX <= 0; LYC <= 0; vbk <= 0;
             BGP <= 8'hFC; OBP0 <= 8'hFF; OBP1 <= 8'hFF; WY <= 0; WX <= 0;
-            bcps <= 0; ocps <= 0; opri <= 0;
-            ly <= 0; dot <= 0; mode <= 2'd2; stat_prev <= 0;
-            s_cnt <= 0; s_fp <= 0; s_fhi <= 0; s_pend <= 0;
+            bcps <= cgb_post_boot ? 7'h48 : 0; ocps <= cgb_post_boot ? 7'h50 : 0; opri <= 0;
+            ly <= 0; dot <= 0; mode <= 2'd2; lyc_match <= 1; stat_prev <= 0; vb_delay <= 0;
+            obj_penalty <= 0; obj_tile_valid <= 0;
+            s_cnt <= 0; s_seen <= 0; s_fp <= 0; s_fhi <= 0; s_pend <= 0;
             wy_hit <= 0; wly <= 0;
         end else begin
             // register writes (at ce)
             if (cpu_wr && reg_sel) begin
                 if (cpu_addr[5]) begin                  // FF68-FF6C
                     // BCPD/OCPD writes auto-increment even when blocked in mode 3; reads never do
-                    if (cgb_mode) case (cpu_addr[3:0])
+                    if (cgb_hw) case (cpu_addr[3:0])
                         4'h8: bcps <= {cpu_din[7], cpu_din[5:0]};
-                        4'h9: if (bcps[6]) bcps[5:0] <= bcps[5:0] + 6'd1;
+                        4'h9: if (cgb_mode && bcps[6]) bcps[5:0] <= bcps[5:0] + 6'd1;
                         4'hA: ocps <= {cpu_din[7], cpu_din[5:0]};
-                        4'hB: if (ocps[6]) ocps[5:0] <= ocps[5:0] + 6'd1;
-                        4'hC: opri <= cpu_din[0];
+                        4'hB: if (cgb_mode && ocps[6]) ocps[5:0] <= ocps[5:0] + 6'd1;
+                        4'hC: if (cgb_mode) opri <= cpu_din[0];
                         default: ;
                     endcase
                 end else case (cpu_addr[3:0])           // FF40-FF4F
-                    4'h0: LCDC <= cpu_din;
+                    4'h0: begin
+                        LCDC <= cpu_din;
+                        // Restarting the LCD restarts the comparison clock at LY=0.
+                        // Turning it off deliberately retains the previous comparison bit.
+                        if (!LCDC[7] && cpu_din[7]) lyc_match <= LYC == 0;
+                    end
                     4'h1: STATW <= cpu_din[6:3];
                     4'h2: SCY <= cpu_din;
                     4'h3: SCX <= cpu_din;
@@ -284,7 +307,7 @@ module ppu (
                     4'h9: OBP1 <= cpu_din;
                     4'hA: WY <= cpu_din;
                     4'hB: WX <= cpu_din;
-                    4'hF: if (cgb_mode) vbk <= cpu_din[0];
+                    4'hF: if (cgb_hw) vbk <= cpu_din[0];
                     default: ;
                 endcase
             end
@@ -292,11 +315,21 @@ module ppu (
             if (ce_t) begin
                 stat_prev <= stat_line;
                 if (stat_line && !stat_prev) irq_stat <= 1;
+                if (vb_delay != 0) begin
+                    vb_delay <= vb_delay - 1'b1;
+                    if (vb_delay == 1) irq_vblank <= 1;
+                end
             end
 
             if (!LCDC[7]) begin
-                ly <= 0; dot <= 0; mode <= 2'd0;
+                ly <= 0; dot <= 0; mode <= 2'd0; vb_delay <= 0;
             end else if (ce_t) begin
+                // While running, the coincidence clock follows LY/LYC. At a line boundary
+                // compare the LY value that becomes visible on this same dot.
+                if (dot == 9'd455)
+                    lyc_match <= (ly == 8'd153 ? 8'd0 : ly + 1'b1) == LYC;
+                else
+                    lyc_match <= ly == LYC;
                 // ---------------- dot / line counters ----------------
                 if (dot == 9'd455) begin
                     dot <= 0;
@@ -305,10 +338,10 @@ module ppu (
                         ly <= 0; mode <= 2'd2; wly <= 0; wy_hit <= 0; vsync <= 1;
                     end else begin
                         ly <= ly + 1;
-                        if (ly == 8'd143) begin mode <= 2'd1; irq_vblank <= 1; end
+                        if (ly == 8'd143) begin mode <= 2'd1; vb_delay <= 3'd1; end
                         else if (ly < 8'd143) mode <= 2'd2;
                     end
-                    s_cnt <= 0; s_fp <= 0; s_fhi <= 0; s_pend <= 0; scan_i <= 0;
+                    s_cnt <= 0; s_seen <= 0; s_fp <= 0; s_fhi <= 0; s_pend <= 0; scan_i <= 0;
                 end else dot <= dot + 1;
 
                 // ---------------- mode 2: OAM scan ----------------
@@ -318,11 +351,14 @@ module ppu (
                         win_line_used <= 0;
                     end
                     if (!dot[0] && dot < 9'd80) begin
-                        if (s_hit && s_cnt < 4'd10) begin
-                            s_x[s_cnt]  <= o_x;
-                            s_ad[s_cnt] <= {o_t, yrel[3:0], o_a[6]};
-                            s_at[s_cnt] <= {o_a[7], o_a[5], o_a[4], o_a[3] & cgb_mode, o_a[2:0]};
-                            s_cnt <= s_cnt + 1;
+                        if (s_hit && s_seen < 4'd10) begin
+                            s_seen <= s_seen + 1'b1;
+                            if (o_x < 8'd168) begin
+                                s_x[s_cnt]  <= o_x;
+                                s_ad[s_cnt] <= {o_t, yrel[3:0], o_a[6]};
+                                s_at[s_cnt] <= {o_a[7], o_a[5], o_a[4], o_a[3] & cgb_mode, o_a[2:0]};
+                                s_cnt <= s_cnt + 1'b1;
+                            end
                         end
                     end else if (dot[0]) scan_i <= scan_i + 1;
                 end
@@ -338,11 +374,14 @@ module ppu (
                 if (mode == 2'd2 && dot == 9'd79) begin
                     mode <= 2'd3;
                     fstep <= 0; ftx <= 0; l_valid <= 0; sh_cnt <= 0; px <= 0;
+                    obj_penalty <= 0; obj_tile_valid <= 0;
                     discard <= SCX[2:0]; win_mode <= 0; s_done <= 0;
                     sfifo <= 0; sf_pal <= 0; sf_dp <= 0; sf_pri <= 0; sf_oam <= 0;
                 end
 
-                if (mode == 2'd3 && !s_busy) begin
+                if (mode == 2'd3 && px == 8'd168) begin
+                    if (dot >= mode3_last) mode <= 2'd0;
+                end else if (mode == 2'd3 && !s_busy) begin
                     // BG fetcher (only after sprite fetch has drained). DMG/CGB share the schedule;
                     // CGB adds the bank-1 attribute read in the otherwise idle step 1.
                     case (fstep)
@@ -361,6 +400,11 @@ module ppu (
                     endcase
 
                     if (spr_on && m_hit) begin
+                        obj_penalty <= obj_penalty + 7'd6 +
+                                       ((!obj_tile_valid || obj_tile_now != obj_tile) ?
+                                        obj_wait : 4'd0);
+                        obj_tile <= obj_tile_now;
+                        obj_tile_valid <= 1;
                         // merge sprite into sprite FIFO; costs this dot. Transparent FIFO pixels always
                         // take the sprite; in CGB mode a lower OAM slot also replaces an opaque pixel
                         // (OAM-order priority), in DMG mode the earlier (lower X) sprite stays.
@@ -401,7 +445,7 @@ module ppu (
                             sfifo <= sfifo << 2; sf_pal <= sf_pal << 3; sf_dp <= sf_dp << 1;
                             sf_pri <= sf_pri << 1; sf_oam <= sf_oam << 4;
                             px <= px + 1;
-                            if (px == 8'd167) mode <= 2'd0;
+                            if (px == 8'd167) px <= 8'd168;
                         end
                     end else if (sh_cnt == 0 && l_valid) begin
                         sh_lo <= l_lo; sh_hi <= l_hi; sh_at <= l_at; sh_cnt <= 8; l_valid <= 0;

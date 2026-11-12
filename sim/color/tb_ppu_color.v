@@ -46,7 +46,8 @@ module tb;
     wire [7:0] pix_x, pix_y;
 
     ppu dut (
-        .clk(clk), .rst(rst), .ce_t(ce_t), .ce(ce), .cgb_mode(cgb), .dmg_color(1'b0), .boot(1'b0),
+        .clk(clk), .rst(rst), .ce_t(ce_t), .ce(ce), .cgb_mode(cgb), .cgb_hw(cgb),
+        .cgb_post_boot(1'b0), .dmg_color(1'b0), .boot(1'b0),
         .cpu_addr(addr), .cpu_wr(cpu_wr), .cpu_din(din), .cpu_dout(dout),
         .vram_sel(vram_sel), .vram_dma(1'b0), .oam_dma_vram(1'b0), .oam_dma_addr(13'd0), .oam_dma_vq(),
         .oam_sel(oam_sel), .reg_sel(reg_sel),
