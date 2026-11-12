@@ -14,10 +14,12 @@ module gb (
     output     [7:0]  pix_y,
     output            vsync,
     output            lcd_on,
+    output     [9:0]  audio_sample,
     // cartridge (from header, set by the loader): type 0 none, 1 MBC1 (or MBC2), 2 MBC3, 3 MBC5
     input      [1:0]  cart_type,
     input             cart_rtc,         // header type 0F/10: MBC3 with timer
     input             cart_mbc2,        // header type 05/06: MBC2 (cart_type is 1)
+    input             cart_mbc1m,      // MBC1 multicart: 4 low + 2 high ROM-bank bits
     input             cart_ram,         // header declares cartridge RAM
     input      [8:0]  rom_mask,         // ROM bank mask (banks - 1)
     input      [3:0]  ram_mask,         // RAM bank mask
@@ -85,7 +87,7 @@ module gb (
 
     sm83 cpu (
         .clk(clk), .rst(rst), .ce(cpu_ce), .addr(a), .dout(cpu_dout), .wr(cpu_wr), .rd(cpu_rd),
-        .din(cpu_din), .irq(irq), .cgb_mode(cgb_mode), .boot(boot_en), .halted(cpu_halted),
+        .din(cpu_din), .irq(irq), .boot(boot_en), .halted(cpu_halted),
         .stop_req(stop_req), .pc_dbg(pc_dbg)
     );
 
@@ -175,8 +177,12 @@ module gb (
         endcase
     end
     wire mbc1 = cart_type == 2'd1;
-    wire [8:0] bank_hi = mbc1 ? {2'b00, ram_bank[1:0], rom_bank[4:0]} : rom_bank;     // 4000-7FFF
-    wire [8:0] bank_lo = mbc1 && mbc1_mode ? {2'b00, ram_bank[1:0], 5'd0} : 9'd0;     // 0000-3FFF
+    wire [3:0] mbc1m_low = rom_bank[4:0] == 0 ? 4'd1 : rom_bank[3:0];
+    wire [8:0] bank_hi = cart_mbc1m ? {3'b000, ram_bank[1:0], mbc1m_low} :
+                          mbc1 ? {2'b00, ram_bank[1:0], rom_bank[4:0]} : rom_bank;     // 4000-7FFF
+    wire [8:0] bank_lo = mbc1 && mbc1_mode ?
+                          (cart_mbc1m ? {3'b000, ram_bank[1:0], 4'd0} :
+                                        {2'b00, ram_bank[1:0], 5'd0}) : 9'd0;         // 0000-3FFF
     wire [8:0] bank = (ma[14] ? bank_hi : bank_lo) & rom_mask;
     wire [3:0] rbank = (mbc1 && !mbc1_mode ? 4'd0 : ram_bank) & ram_mask;
     wire rom_sel = ma[15] == 1'b0;
@@ -241,6 +247,27 @@ module gb (
         .din(cpu_dout), .dout(tim_q), .irq(tim_irq)
     );
 
+    // ---------------- APU ----------------
+    wire [7:0] apu_q;
+    wire apu_sel = a >= 16'hFF10 && a <= 16'hFF3F;
+    apu sound (
+        .clk(clk), .rst(rst), .ce(clk_en && !stopped), .wr(wr_now),
+        .sel(apu_sel), .addr_lo(a[7:0]), .din(cpu_dout), .dout(apu_q),
+        .sample(audio_sample)
+    );
+
+    // Undocumented CGB registers used by software and boot-state checks.
+    reg [7:0] cgb72, cgb73;
+    reg [2:0] cgb75;
+    always @(posedge clk)
+        if (rst) begin cgb72 <= 0; cgb73 <= 0; cgb75 <= 0; end
+        else if (wr_now) case (a)
+            16'hFF72: cgb72 <= cpu_dout;
+            16'hFF73: cgb73 <= cpu_dout;
+            16'hFF75: cgb75 <= cpu_dout[6:4];
+            default: ;
+        endcase
+
     // ---------------- PPU ----------------
     wire [7:0] ppu_q;
     wire vram_sel = a[15:13] == 3'b100;
@@ -256,7 +283,8 @@ module gb (
                            rom_sel ? ext_rd : cart_q;
 
     ppu ppu (
-        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release), .cgb_mode(cgb),
+        .clk(clk), .rst(rst), .ce_t(clk_en && !stopped), .ce(cpu_ce || hdma_release),
+        .cgb_mode(cgb), .cgb_hw(1'b1), .cgb_post_boot(!boot_en),
         .dmg_color(boot_en && key0_dmg), .boot(boot_en),
         .cpu_addr(hdma_busy ? {3'b100, hdma_dst} : a),
         .cpu_wr(hdma_busy ? hdma_put : wr_now && !cpu_blk),
@@ -393,6 +421,7 @@ module gb (
         else if (hram_sel)       cpu_din = hram_q;
         else if (tim_sel)        cpu_din = tim_q;
         else if (preg_sel)       cpu_din = ppu_q;
+        else if (apu_sel)        cpu_din = apu_q;
         else if (a == 16'hFF00)  cpu_din = {2'b11, joy_sel, joy_in};
         else if (a == 16'hFF01)  cpu_din = sb;
         else if (a == 16'hFF02)  cpu_din = {sc[7], 6'b111111, sc[0]};
@@ -400,6 +429,10 @@ module gb (
         else if (a == 16'hFF4D)  cpu_din = cgb ? {double_speed, 6'b111111, key_prepare} : 8'hFF;
         else if (a == 16'hFF55)  cpu_din = cgb ? {!hdma_active, hdma_left} : 8'hFF;
         else if (a == 16'hFF70)  cpu_din = cgb ? {5'b11111, svbk} : 8'hFF;
+        else if (a == 16'hFF72)  cpu_din = cgb72;
+        else if (a == 16'hFF73)  cpu_din = cgb73;
+        else if (a == 16'hFF75)  cpu_din = {1'b1, cgb75, 4'hF};
+        else if (a == 16'hFF76 || a == 16'hFF77) cpu_din = 8'h00;
         else                     cpu_din = 8'hFF;
     end
 endmodule

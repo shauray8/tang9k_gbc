@@ -6,7 +6,9 @@
 // pixel lands (vblank entry): kind N rendered, F first frame after LCD on, O LCD off (all white,
 // one per 70224 dots since the previous event). Hash covers the 160x144 framebuffer as 16-bit LE words.
 // GB_FRAME_DUMP=N:path additionally writes hash event N's frame as PPM and stops the run there.
+// GB_STOP_PC=hex stops before executing that PC and prints CPU/timer state (pre-assert diagnostics).
 #include "Vgb.h"
+#include "Vgb___024root.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdlib>
@@ -24,7 +26,7 @@ int main(int argc, char **argv) {
     std::vector<unsigned char> ext(1 << 22, 0xFF);
     FILE *rf = fopen(argv[1], "rb");
     if (!rf) { perror(argv[1]); return 2; }
-    size_t rom_len = fread(ext.data(), 1, 0x3E0000, rf);
+    size_t rom_len = fread(ext.data(), 1, 0x400000, rf);
     fclose(rf);
     // GB_SAV=<file.sav>: battery RAM to start from (raw cartridge RAM, as host/saves.py stores it)
     if (const char *sp = getenv("GB_SAV")) {
@@ -46,7 +48,12 @@ int main(int argc, char **argv) {
     g->cart_rtc = type == 0x0F || type == 0x10;
     g->cart_mbc2 = mbc2;
     g->cart_ram = rb != 0 || mbc2;
+    g->cart_mbc1m = cart == 1 && rom_len > 0x40107 &&
+                    ext[0x40104] == 0xCE && ext[0x40105] == 0xED &&
+                    ext[0x40106] == 0x66 && ext[0x40107] == 0x66;
     g->cgb_mode = (ext[0x143] & 0x80) != 0;
+    // Model-specific Mooneye ROMs do not encode their target in the cartridge header.
+    if (getenv("GB_CGB")) g->cgb_mode = true;
     // GB_BOOT=<cgb_boot.bin>: run the boot ROM from PSRAM 3D0000 (it picks CGB / DMG-compat mode)
     g->boot_en = 0;
     if (const char *bp = getenv("GB_BOOT")) {
@@ -115,6 +122,7 @@ int main(int argc, char **argv) {
     static unsigned trace_pc[4096], trace_bank[4096]; long long trace_n = 0; unsigned last_pc = ~0u;
     // GB_SNAP=<n>: write build/snap-<frame>.ppm every n frames.
     const int snap_every = getenv("GB_SNAP") ? atoi(getenv("GB_SNAP")) : 0;
+    const unsigned stop_pc = getenv("GB_STOP_PC") ? strtoul(getenv("GB_STOP_PC"), nullptr, 16) : 0x10000;
     while (ticks < max_ticks) {
         // Same fractional enable as the 27 MHz system domain.
         g->clk_en_fast = acc >= 154776 && acc < 225000;
@@ -124,6 +132,20 @@ int main(int argc, char **argv) {
         g->clk = 0; g->eval();
         bool req = g->ext_req, we = g->ext_we; unsigned addr = g->ext_addr, wd = g->ext_wd;
         g->clk = 1; g->eval();
+        if (g->pc_dbg == stop_pc) {
+            auto *r = g->rootp;
+            printf("[tb] stop pc=%04x AF=%02x%02x BC=%02x%02x DE=%02x%02x HL=%02x%02x "
+                   "SP=%04x TIMA=%02x DIV=%04x TAC=%02x PPU=%d:%03x TEST=%02x\n", g->pc_dbg,
+                   r->gb__DOT__cpu__DOT__A, r->gb__DOT__cpu__DOT__F,
+                   r->gb__DOT__cpu__DOT__B, r->gb__DOT__cpu__DOT__C,
+                   r->gb__DOT__cpu__DOT__D, r->gb__DOT__cpu__DOT__E,
+                   r->gb__DOT__cpu__DOT__H, r->gb__DOT__cpu__DOT__L,
+                   r->gb__DOT__cpu__DOT__SP, r->gb__DOT__timer__DOT__tima,
+                   r->gb__DOT__timer__DOT__div, r->gb__DOT__timer__DOT__tac,
+                   r->gb__DOT__ppu__DOT__mode, r->gb__DOT__ppu__DOT__dot,
+                   r->gb__DOT__hram[0]);
+            break;
+        }
         if (read_due > 0 && --read_due == 0) g->ext_rd = read_data;
         if (busy_left > 0) busy_left--;
         if (req && busy_left > 0) {
@@ -181,7 +203,14 @@ int main(int argc, char **argv) {
             // Mooneye protocol: Fibonacci bytes 3 5 8 13 21 34 = pass, six 0x42 = fail.
             static const std::string fib("\x03\x05\x08\x0D\x15\x22", 6), bad(6, '\x42');
             if (ser.size() >= 6 && ser.compare(ser.size() - 6, 6, fib) == 0) { printf("\nPassed\n"); break; }
-            if (ser.size() >= 6 && ser.compare(ser.size() - 6, 6, bad) == 0) { printf("\nFailed\n"); break; }
+            if (ser.size() >= 6 && ser.compare(ser.size() - 6, 6, bad) == 0) {
+                auto *r = g->rootp;
+                printf("\nFailed: BC=%02x%02x TIMA=%02x DIV=%04x TAC=%02x\n",
+                       r->gb__DOT__cpu__DOT__B, r->gb__DOT__cpu__DOT__C,
+                       r->gb__DOT__timer__DOT__tima, r->gb__DOT__timer__DOT__div,
+                       r->gb__DOT__timer__DOT__tac);
+                break;
+            }
             if (ser.find("Passed") != std::string::npos || ser.find("Failed") != std::string::npos) break;
         }
     }
